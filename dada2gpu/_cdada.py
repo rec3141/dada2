@@ -187,6 +187,118 @@ _lib.dada2_tax_result_free.restype = None
 _lib.dada2_tax_result_free.argtypes = [ct.POINTER(TaxResult)]
 
 
+# =========================================================================
+# Paired-read merging functions
+# =========================================================================
+
+_lib.dada2_nwalign.restype = ct.c_int
+_lib.dada2_nwalign.argtypes = [
+    ct.c_char_p,   # s1
+    ct.c_char_p,   # s2
+    ct.c_int,      # match
+    ct.c_int,      # mismatch
+    ct.c_int,      # gap_p
+    ct.c_int,      # band
+    ct.POINTER(ct.c_void_p),  # al1_out
+    ct.POINTER(ct.c_void_p),  # al2_out
+]
+
+_lib.dada2_eval_pair.restype = None
+_lib.dada2_eval_pair.argtypes = [
+    ct.c_char_p,              # al1
+    ct.c_char_p,              # al2
+    ct.POINTER(ct.c_int),     # out_match
+    ct.POINTER(ct.c_int),     # out_mismatch
+    ct.POINTER(ct.c_int),     # out_indel
+]
+
+# Use c_void_p for returned malloc'd strings to prevent ctypes auto-free
+_lib.dada2_pair_consensus.restype = ct.c_void_p
+_lib.dada2_pair_consensus.argtypes = [
+    ct.c_char_p,   # al1
+    ct.c_char_p,   # al2
+    ct.c_int,      # prefer
+    ct.c_int,      # trim_overhang
+]
+
+_lib.dada2_rc.restype = ct.c_void_p
+_lib.dada2_rc.argtypes = [ct.c_char_p]
+
+_lib.dada2_free_string.restype = None
+_lib.dada2_free_string.argtypes = [ct.c_void_p]
+
+
+def nwalign(s1, s2, match=1, mismatch=-64, gap_p=-64, band=-1):
+    """NW ends-free alignment of two ACGT strings.
+
+    Returns:
+        (al1, al2): tuple of aligned strings.
+    """
+    al1_p = ct.c_void_p()
+    al2_p = ct.c_void_p()
+    s1_b = s1.encode("ascii") if isinstance(s1, str) else s1
+    s2_b = s2.encode("ascii") if isinstance(s2, str) else s2
+
+    ret = _lib.dada2_nwalign(s1_b, s2_b, match, mismatch, gap_p, band,
+                              ct.byref(al1_p), ct.byref(al2_p))
+    if ret != 0:
+        raise RuntimeError("dada2_nwalign failed")
+
+    al1 = ct.cast(al1_p, ct.c_char_p).value.decode("ascii")
+    al2 = ct.cast(al2_p, ct.c_char_p).value.decode("ascii")
+    _lib.dada2_free_string(al1_p)
+    _lib.dada2_free_string(al2_p)
+    return al1, al2
+
+
+def eval_pair(al1, al2):
+    """Evaluate an alignment: count matches, mismatches, indels (skipping end gaps).
+
+    Returns:
+        (nmatch, nmismatch, nindel): tuple of ints.
+    """
+    m = ct.c_int(0)
+    mm = ct.c_int(0)
+    ind = ct.c_int(0)
+    al1_b = al1.encode("ascii") if isinstance(al1, str) else al1
+    al2_b = al2.encode("ascii") if isinstance(al2, str) else al2
+
+    _lib.dada2_eval_pair(al1_b, al2_b, ct.byref(m), ct.byref(mm), ct.byref(ind))
+    return m.value, mm.value, ind.value
+
+
+def pair_consensus(al1, al2, prefer=1, trim_overhang=True):
+    """Build consensus from two aligned strings.
+
+    Args:
+        prefer: 1 = al1 wins mismatches, 2 = al2 wins.
+        trim_overhang: if True, trim overhanging ends.
+
+    Returns:
+        consensus string.
+    """
+    al1_b = al1.encode("ascii") if isinstance(al1, str) else al1
+    al2_b = al2.encode("ascii") if isinstance(al2, str) else al2
+
+    result_p = _lib.dada2_pair_consensus(al1_b, al2_b, prefer, int(trim_overhang))
+    if not result_p:
+        raise RuntimeError("dada2_pair_consensus failed")
+    result = ct.cast(result_p, ct.c_char_p).value.decode("ascii")
+    _lib.dada2_free_string(result_p)
+    return result
+
+
+def rc(seq):
+    """Reverse complement an ACGT string."""
+    seq_b = seq.encode("ascii") if isinstance(seq, str) else seq
+    result_p = _lib.dada2_rc(seq_b)
+    if not result_p:
+        raise RuntimeError("dada2_rc failed")
+    result = ct.cast(result_p, ct.c_char_p).value.decode("ascii")
+    _lib.dada2_free_string(result_p)
+    return result
+
+
 def run_taxonomy(seqs, refs, ref_to_genus, genusmat, ngenus, nlevel, verbose=True):
     """Run dada2 taxonomy assignment via C library.
 

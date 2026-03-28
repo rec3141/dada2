@@ -3,6 +3,7 @@
 from .dada import dada, learn_errors, DADA_OPTS, set_dada_opt, get_dada_opt
 from .io import derep_fastq
 from .error import loess_errfun, noqual_errfun, inflate_err
-from ._cdada import gpu_available
+from ._cdada import gpu_available, nwalign, eval_pair, pair_consensus, rc
+from .paired import merge_pairs
 
 __version__ = "0.1.0"

@@ -47,10 +47,12 @@ def _derep_fastq_c(filepath):
     return {"seqs": seqs, "abundances": abunds, "quals": quals, "map": np.array([], dtype=np.int32)}
 
 
-def derep_fastq(filepath, verbose=False):
+def derep_fastq(filepath, verbose=False, with_map=False):
     """Dereplicate a FASTQ file.
 
     Uses C implementation (zlib) when available for ~10x speedup.
+    Use with_map=True to get the read-to-unique mapping (needed for mergePairs).
+    The C implementation doesn't compute the map, so with_map=True forces Python.
 
     Returns:
         dict with keys:
@@ -59,8 +61,8 @@ def derep_fastq(filepath, verbose=False):
             quals: numpy float64 array (n_uniques x max_seqlen), average quality
             map: numpy int32 array, maps each read to its unique index (0-indexed)
     """
-    # Use C implementation if available (~10x faster)
-    if _HAS_C_DEREP:
+    # Use C implementation if available (~10x faster) — but not if map is needed
+    if _HAS_C_DEREP and not with_map:
         result = _derep_fastq_c(filepath)
         if verbose:
             print(f"Read {result['abundances'].sum()} reads, {len(result['seqs'])} unique sequences")

@@ -96,6 +96,32 @@ TaxResult* dada2_assign_taxonomy(
 
 void dada2_tax_result_free(TaxResult *res);
 
+/* Paired-read merging functions */
+
+/* NW ends-free alignment of two ACGT strings.
+ * Returns 0 on success, -1 on error.
+ * Caller must free *al1_out and *al2_out with dada2_free_string(). */
+int dada2_nwalign(const char *s1, const char *s2,
+                  int match, int mismatch, int gap_p, int band,
+                  char **al1_out, char **al2_out);
+
+/* Evaluate an alignment: count matches, mismatches, indels (skipping end gaps). */
+void dada2_eval_pair(const char *al1, const char *al2,
+                     int *out_match, int *out_mismatch, int *out_indel);
+
+/* Build consensus from two aligned strings.
+ * prefer=1: al1 wins mismatches; prefer=2: al2 wins.
+ * Caller must free result with dada2_free_string(). */
+char *dada2_pair_consensus(const char *al1, const char *al2,
+                           int prefer, int trim_overhang);
+
+/* Reverse complement an ACGT string.
+ * Caller must free result with dada2_free_string(). */
+char *dada2_rc(const char *seq);
+
+/* Free a string returned by the paired-read functions. */
+void dada2_free_string(char *s);
+
 #ifdef __cplusplus
 }
 #endif

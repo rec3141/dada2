@@ -11,6 +11,7 @@ CXXFLAGS = -O3 -fPIC -std=c++11 -DNO_RCPP -DNDEBUG -march=native -fopenmp -Wno-f
 CSRCS = src/derep.c
 
 SRCS = src/dada2_capi.cpp \
+       src/paired_capi.cpp \
        src/taxonomy_capi.cpp \
        src/cluster.cpp \
        src/containers.cpp \
