@@ -122,6 +122,42 @@ char *dada2_rc(const char *seq);
 /* Free a string returned by the paired-read functions. */
 void dada2_free_string(char *s);
 
+/* ---- Chimera detection ---- */
+
+typedef struct {
+    int  n_seqs;
+    int *nflag;    /* per-ASV: number of samples flagging as chimeric */
+    int *nsam;     /* per-ASV: number of samples where ASV is present */
+} ChimeraResult;
+
+/* Check if seq is a bimera of the given parent sequences.
+ * Returns 1 if bimera, 0 if not. */
+int dada2_is_bimera(
+    const char *seq,
+    const char **parents,
+    int n_parents,
+    int allow_one_off,
+    int min_one_off_par_dist,
+    int match, int mismatch, int gap_p, int max_shift
+);
+
+/* Table-level consensus chimera detection.
+ * mat: count matrix, column-major (nrow x ncol), rows=samples, cols=ASVs.
+ * seqs: ASV sequences (ncol entries).
+ * Returns a ChimeraResult* that must be freed with dada2_chimera_result_free(). */
+ChimeraResult* dada2_table_bimera(
+    const int *mat,
+    int nrow, int ncol,
+    const char **seqs,
+    double min_fold,
+    int min_abund,
+    int allow_one_off,
+    int min_one_off_par_dist,
+    int match, int mismatch, int gap_p, int max_shift
+);
+
+void dada2_chimera_result_free(ChimeraResult *res);
+
 #ifdef __cplusplus
 }
 #endif

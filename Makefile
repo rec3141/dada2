@@ -13,6 +13,7 @@ CSRCS = src/derep.c
 SRCS = src/dada2_capi.cpp \
        src/paired_capi.cpp \
        src/taxonomy_capi.cpp \
+       src/chimera_capi.cpp \
        src/cluster.cpp \
        src/containers.cpp \
        src/pval.cpp \

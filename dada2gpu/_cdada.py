@@ -354,3 +354,123 @@ def run_taxonomy(seqs, refs, ref_to_genus, genusmat, ngenus, nlevel, verbose=Tru
 
     _lib.dada2_tax_result_free(res_ptr)
     return result
+
+
+# =========================================================================
+# Chimera detection
+# =========================================================================
+
+class ChimeraResult(ct.Structure):
+    _fields_ = [
+        ("n_seqs", ct.c_int),
+        ("nflag", ct.POINTER(ct.c_int)),
+        ("nsam", ct.POINTER(ct.c_int)),
+    ]
+
+
+_lib.dada2_is_bimera.restype = ct.c_int
+_lib.dada2_is_bimera.argtypes = [
+    ct.c_char_p,               # seq
+    ct.POINTER(ct.c_char_p),   # parents
+    ct.c_int,                   # n_parents
+    ct.c_int,                   # allow_one_off
+    ct.c_int,                   # min_one_off_par_dist
+    ct.c_int, ct.c_int, ct.c_int, ct.c_int,  # match, mismatch, gap_p, max_shift
+]
+
+_lib.dada2_table_bimera.restype = ct.POINTER(ChimeraResult)
+_lib.dada2_table_bimera.argtypes = [
+    ct.POINTER(ct.c_int),      # mat
+    ct.c_int, ct.c_int,        # nrow, ncol
+    ct.POINTER(ct.c_char_p),   # seqs
+    ct.c_double,                # min_fold
+    ct.c_int,                   # min_abund
+    ct.c_int,                   # allow_one_off
+    ct.c_int,                   # min_one_off_par_dist
+    ct.c_int, ct.c_int, ct.c_int, ct.c_int,  # match, mismatch, gap_p, max_shift
+]
+
+_lib.dada2_chimera_result_free.restype = None
+_lib.dada2_chimera_result_free.argtypes = [ct.POINTER(ChimeraResult)]
+
+
+def is_bimera(seq, parents, allow_one_off=False, min_one_off_par_dist=4,
+              match=5, mismatch=-4, gap_p=-8, max_shift=16):
+    """Check if seq is a bimera of the given parent sequences.
+
+    Args:
+        seq: query DNA sequence (str, ACGT).
+        parents: list of parent DNA sequences (str, ACGT).
+        allow_one_off: allow one mismatch in chimera model.
+        min_one_off_par_dist: minimum hamming distance between parents for one-off.
+        match, mismatch, gap_p, max_shift: alignment parameters.
+
+    Returns:
+        True if seq is a bimera, False otherwise.
+    """
+    n_parents = len(parents)
+    if n_parents == 0:
+        return False
+
+    seq_b = seq.encode("ascii") if isinstance(seq, str) else seq
+    par_arr = (ct.c_char_p * n_parents)()
+    for i, p in enumerate(parents):
+        par_arr[i] = p.encode("ascii") if isinstance(p, str) else p
+
+    ret = _lib.dada2_is_bimera(
+        seq_b, par_arr, n_parents,
+        int(allow_one_off), min_one_off_par_dist,
+        match, mismatch, gap_p, max_shift
+    )
+    return bool(ret)
+
+
+def table_bimera(mat, seqs, min_fold=1.5, min_abund=2,
+                 allow_one_off=False, min_one_off_par_dist=4,
+                 match=5, mismatch=-4, gap_p=-8, max_shift=16):
+    """Table-level consensus chimera detection.
+
+    Args:
+        mat: numpy int32 array (nrow x ncol), column-major (Fortran order).
+             Rows = samples, columns = ASVs.
+        seqs: list of ASV sequences (str, ACGT), length ncol.
+        min_fold: parent must be this-fold more abundant.
+        min_abund: parent minimum absolute abundance.
+        allow_one_off: allow one mismatch in chimera model.
+        min_one_off_par_dist: minimum hamming distance for one-off parents.
+        match, mismatch, gap_p, max_shift: alignment parameters.
+
+    Returns:
+        dict with:
+            nflag: numpy int32 array (ncol,) - per-ASV count of samples flagging chimeric.
+            nsam: numpy int32 array (ncol,) - per-ASV count of samples where present.
+    """
+    mat = np.asfortranarray(mat, dtype=np.int32)
+    nrow, ncol = mat.shape
+
+    seq_arr = (ct.c_char_p * ncol)()
+    for i, s in enumerate(seqs):
+        seq_arr[i] = s.encode("ascii") if isinstance(s, str) else s
+
+    res_ptr = _lib.dada2_table_bimera(
+        mat.ctypes.data_as(ct.POINTER(ct.c_int)),
+        nrow, ncol,
+        seq_arr,
+        ct.c_double(min_fold),
+        min_abund,
+        int(allow_one_off),
+        min_one_off_par_dist,
+        match, mismatch, gap_p, max_shift
+    )
+
+    if not res_ptr:
+        raise RuntimeError("dada2_table_bimera returned NULL")
+
+    res = res_ptr.contents
+    result = {
+        "nflag": np.ctypeslib.as_array(res.nflag, shape=(ncol,)).copy(),
+        "nsam": np.ctypeslib.as_array(res.nsam, shape=(ncol,)).copy(),
+    }
+
+    _lib.dada2_chimera_result_free(res_ptr)
+    return result
