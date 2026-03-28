@@ -155,3 +155,90 @@ def run_dada(seqs, abundances, err_mat, quals=None, priors=None,
 
     _lib.dada2_result_free(res_ptr)
     return result
+
+
+# =========================================================================
+# Taxonomy assignment
+# =========================================================================
+
+class TaxResult(ct.Structure):
+    _fields_ = [
+        ("nseq", ct.c_int),
+        ("nlevel", ct.c_int),
+        ("rval", ct.POINTER(ct.c_int)),
+        ("rboot", ct.POINTER(ct.c_int)),
+    ]
+
+
+_lib.dada2_assign_taxonomy.restype = ct.POINTER(TaxResult)
+_lib.dada2_assign_taxonomy.argtypes = [
+    ct.POINTER(ct.c_char_p),  # seqs
+    ct.c_int,                  # nseq
+    ct.POINTER(ct.c_char_p),  # refs
+    ct.c_int,                  # nref
+    ct.POINTER(ct.c_int),     # ref_to_genus
+    ct.POINTER(ct.c_int),     # genusmat
+    ct.c_int,                  # ngenus
+    ct.c_int,                  # nlevel
+    ct.c_int,                  # verbose
+]
+
+_lib.dada2_tax_result_free.restype = None
+_lib.dada2_tax_result_free.argtypes = [ct.POINTER(TaxResult)]
+
+
+def run_taxonomy(seqs, refs, ref_to_genus, genusmat, ngenus, nlevel, verbose=True):
+    """Run dada2 taxonomy assignment via C library.
+
+    Args:
+        seqs: list of query sequences (str)
+        refs: list of reference sequences (str)
+        ref_to_genus: numpy array (nref,) int32, 0-indexed genus ID per ref
+        genusmat: numpy array (ngenus, nlevel) int32, genus-to-level mapping
+        ngenus: int
+        nlevel: int
+        verbose: bool
+
+    Returns:
+        dict with:
+            rval: numpy array (nseq,) int32, 1-indexed best genus per query (0=NA)
+            rboot: numpy array (nseq, nlevel) int32, bootstrap counts
+    """
+    nseq = len(seqs)
+    nref = len(refs)
+
+    # Convert sequences to C strings
+    seq_arr = (ct.c_char_p * nseq)()
+    for i, s in enumerate(seqs):
+        seq_arr[i] = s.encode("ascii") if isinstance(s, str) else s
+
+    ref_arr = (ct.c_char_p * nref)()
+    for i, s in enumerate(refs):
+        ref_arr[i] = s.encode("ascii") if isinstance(s, str) else s
+
+    # Reference-to-genus mapping
+    rtg = np.ascontiguousarray(ref_to_genus, dtype=np.int32)
+
+    # Genus matrix (row-major)
+    gmat = np.ascontiguousarray(genusmat, dtype=np.int32)
+
+    res_ptr = _lib.dada2_assign_taxonomy(
+        seq_arr, nseq,
+        ref_arr, nref,
+        rtg.ctypes.data_as(ct.POINTER(ct.c_int)),
+        gmat.ctypes.data_as(ct.POINTER(ct.c_int)),
+        ngenus, nlevel,
+        ct.c_int(int(verbose))
+    )
+
+    if not res_ptr:
+        raise RuntimeError("dada2_assign_taxonomy returned NULL")
+
+    res = res_ptr.contents
+    result = {
+        "rval": np.ctypeslib.as_array(res.rval, shape=(nseq,)).copy(),
+        "rboot": np.ctypeslib.as_array(res.rboot, shape=(nseq * nlevel,)).copy().reshape(nseq, nlevel),
+    }
+
+    _lib.dada2_tax_result_free(res_ptr)
+    return result
