@@ -1,7 +1,9 @@
 """Main DADA2 denoising pipeline."""
 
 import sys
+import os
 import numpy as np
+from concurrent.futures import ThreadPoolExecutor
 from . import _cdada
 from .io import derep_fastq
 from .error import loess_errfun, get_initial_err
@@ -101,39 +103,24 @@ def dada(derep, err=None, error_estimation_function=None, self_consist=False,
             sys.stdout.write(f"   selfConsist step {nconsist}")
             sys.stdout.flush()
 
-        results = []
-        trans_list = []
-
         # R uses MAX_CLUST=1 on the initialization pass (nconsist==1 after init)
         max_clust_iter = 1 if initialize_err else o["MAX_CLUST"]
 
-        for i, drp in enumerate(derep):
-            if verbose:
-                if self_consist:
-                    sys.stdout.write(".")
-                    sys.stdout.flush()
+        # Extend error matrix once for all samples
+        max_q_all = max((int(np.nanmax(d["quals"])) + 1 if d["quals"].size and not np.all(np.isnan(d["quals"])) else 0) for d in derep)
+        erri = err.copy()
+        if max_q_all > erri.shape[1]:
+            extra = np.tile(erri[:, -1:], (1, max_q_all - erri.shape[1]))
+            erri = np.hstack([erri, extra])
 
+        def _process_sample(drp):
             seqs = drp["seqs"]
-            abundances = drp["abundances"]
-            quals = drp["quals"]
-            nraw = len(seqs)
-
-            if nraw == 0:
-                results.append({"cluster_seqs": [], "cluster_abunds": np.array([]),
-                                "trans": np.zeros((16, err.shape[1]), dtype=np.int32),
-                                "map": np.array([]), "pval": np.array([])})
-                trans_list.append(np.zeros((16, err.shape[1]), dtype=np.int32))
-                continue
-
-            # Extend error matrix if needed
-            max_q_obs = int(np.nanmax(quals)) + 1 if not np.all(np.isnan(quals)) else 0
-            erri = err.copy()
-            if max_q_obs > erri.shape[1]:
-                extra = np.tile(erri[:, -1:], (1, max_q_obs - erri.shape[1]))
-                erri = np.hstack([erri, extra])
-
-            res = _cdada.run_dada(
-                seqs, abundances, erri, quals,
+            if len(seqs) == 0:
+                return {"cluster_seqs": [], "cluster_abunds": np.array([]),
+                        "trans": np.zeros((16, erri.shape[1]), dtype=np.int32),
+                        "map": np.array([]), "pval": np.array([])}
+            return _cdada.run_dada(
+                seqs, drp["abundances"], erri, drp["quals"],
                 match=o["MATCH"], mismatch=o["MISMATCH"], gap_pen=o["GAP_PENALTY"],
                 use_kmers=o["USE_KMERS"], kdist_cutoff=o["KDIST_CUTOFF"],
                 band_size=o["BAND_SIZE"],
@@ -143,15 +130,27 @@ def dada(derep, err=None, error_estimation_function=None, self_consist=False,
                 min_abund=o["MIN_ABUNDANCE"],
                 use_quals=o["USE_QUALS"], vectorized_alignment=o["VECTORIZED_ALIGNMENT"],
                 homo_gap_pen=homo_gap,
-                multithread=True, verbose=(verbose and not self_consist),
+                multithread=False, verbose=False,
                 sse=o["SSE"], gapless=o["GAPLESS"], greedy=o["GREEDY"],
             )
 
-            # Build denoised dict
+        # Process samples in parallel (each single-threaded, many concurrent)
+        n_workers = min(len(derep), os.cpu_count() or 4)
+        os.environ['OMP_NUM_THREADS'] = '1'
+
+        if n_workers > 1 and len(derep) > 1:
+            with ThreadPoolExecutor(max_workers=n_workers) as pool:
+                results = list(pool.map(_process_sample, derep))
+        else:
+            results = [_process_sample(d) for d in derep]
+
+        if verbose and self_consist:
+            sys.stdout.write("." * len(derep))
+
+        trans_list = []
+        for res in results:
             res["denoised"] = {seq: ab for seq, ab in
                                zip(res["cluster_seqs"], res["cluster_abunds"])}
-
-            results.append(res)
             trans_list.append(res["trans"])
 
         if verbose and self_consist:
