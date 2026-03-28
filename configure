@@ -106,18 +106,24 @@ if [ "$HAVE_CUDA" = "1" ]; then
     CUDA_INC_FLAG="$CUDA_INCL"
   fi
 
+  # Write Makevars with overridable CUDA_HOME (defaults to detected path)
   cat > src/Makevars << MAKEVARS_EOF
 PKG_LIBS += \$(shell \${R_HOME}/bin/Rscript -e "RcppParallel::RcppParallelLibs()")
 CXX_STD = CXX11
 
-# CUDA support (auto-detected by configure)
-CUDA_HOME = ${CUDA_HOME}
+# CUDA support (auto-detected by configure, override with CUDA_HOME env var)
+CUDA_HOME ?= ${CUDA_HOME}
 NVCC = \$(CUDA_HOME)/bin/nvcc
-CUDA_ARCH = ${CUDA_ARCH_FLAGS}
-CUDA_CFLAGS = -Xcompiler -fPIC -O2 \$(CUDA_ARCH) ${CUDA_INC_FLAG}
-CUDA_LIBS = -L${CUDA_LIB_DIR} -Wl,-rpath,${CUDA_LIB_DIR} -Wl,--no-as-needed -lcudart -Wl,--as-needed
+CUDA_ARCH ?= ${CUDA_ARCH_FLAGS}
 
-PKG_CPPFLAGS += -DHAVE_CUDA ${CUDA_INC_FLAG}
+# Detect include/lib paths from CUDA_HOME
+CUDA_INC = \$(shell test -d \$(CUDA_HOME)/targets/x86_64-linux/include && echo "-I\$(CUDA_HOME)/targets/x86_64-linux/include" || echo "-I\$(CUDA_HOME)/include")
+CUDA_LIB = \$(shell test -d \$(CUDA_HOME)/lib64 && echo "\$(CUDA_HOME)/lib64" || echo "\$(CUDA_HOME)/lib")
+
+CUDA_CFLAGS = -Xcompiler -fPIC -O2 \$(CUDA_ARCH) \$(CUDA_INC)
+CUDA_LIBS = -L\$(CUDA_LIB) -Wl,-rpath,\$(CUDA_LIB) -Wl,--no-as-needed -lcudart -Wl,--as-needed
+
+PKG_CPPFLAGS += -DHAVE_CUDA \$(CUDA_INC)
 PKG_LIBS += \$(CUDA_LIBS) cuda_compare.o
 
 .PHONY: cuda_obj

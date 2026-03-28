@@ -136,13 +136,13 @@ def dada(derep, err=None, error_estimation_function=None, self_consist=False,
 
         # Parallel strategy: if GPU available, run sequentially (GPU fast enough).
         # If CPU-only, run samples in parallel threads (GIL released in ctypes).
+        # Note: OMP_NUM_THREADS should be set by the caller before importing,
+        # e.g. OMP_NUM_THREADS=1 for multi-sample parallelism.
         use_gpu = _cdada.gpu_available()
         if use_gpu:
-            os.environ['OMP_NUM_THREADS'] = '1'
             results = [_process_sample(d) for d in derep]
         else:
             n_workers = min(len(derep), os.cpu_count() or 4)
-            os.environ['OMP_NUM_THREADS'] = '1'
             if n_workers > 1 and len(derep) > 1:
                 with ThreadPoolExecutor(max_workers=n_workers) as pool:
                     results = list(pool.map(_process_sample, derep))

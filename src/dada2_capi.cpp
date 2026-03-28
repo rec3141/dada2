@@ -137,7 +137,13 @@ extern "C" DadaResult* dada2_run(
         k8 = (uint8_t *)malloc(nraw * n_kmer * sizeof(uint8_t));
         k16 = (uint16_t *)malloc(nraw * n_kmer * sizeof(uint16_t));
         kord = (uint16_t *)malloc(nraw * actual_maxlen * sizeof(uint16_t));
-        if (!k8 || !k16 || !kord) { fprintf(stderr, "Memory allocation failed.\n"); return NULL; }
+        if (!k8 || !k16 || !kord) {
+            free(k8); free(k16); free(kord);
+            for (index = 0; index < (unsigned)nraw; index++) raw_free(raws[index]);
+            free(raws);
+            fprintf(stderr, "Memory allocation failed (kmer structures).\n");
+            return NULL;
+        }
         for (index = 0; index < (unsigned)nraw; index++) {
             raw = raws[index];
             raw->kmer8 = &k8[index * n_kmer];
@@ -157,7 +163,13 @@ extern "C" DadaResult* dada2_run(
 
     /* Convert error matrix to mutable copy for internal use */
     double *err_mat_c = (double *)malloc(16 * ncol_err * sizeof(double));
-    if (!err_mat_c) { fprintf(stderr, "Memory allocation failed.\n"); return NULL; }
+    if (!err_mat_c) {
+        for (index = 0; index < (unsigned)nraw; index++) raw_free(raws[index]);
+        free(raws);
+        if (use_kmers) { free(k8); free(k16); free(kord); }
+        fprintf(stderr, "Memory allocation failed (error matrix).\n");
+        return NULL;
+    }
     memcpy(err_mat_c, err_mat, 16 * ncol_err * sizeof(double));
 
 #ifdef HAVE_CUDA

@@ -29,6 +29,9 @@ typedef struct {
     char **seqs;        /* n_uniques null-terminated strings */
     int *abundances;    /* n_uniques */
     double *quals;      /* n_uniques * max_seq_len, row-major, NaN-padded */
+    /* Note: per-read map (read_idx -> unique_idx) is not returned.
+     * dada() and learnErrors() don't need it. If needed in future,
+     * add int *map (n_reads entries) and populate during parsing. */
 } DerepResult;
 
 static int cmp_entry_desc(const void *a, const void *b) {
@@ -36,10 +39,13 @@ static int cmp_entry_desc(const void *a, const void *b) {
     return (cb > ca) - (cb < ca);
 }
 
+/* FNV-1a hash — good avalanche properties for short DNA strings */
 static unsigned int hash_seq(const char *s, int len) {
-    unsigned int h = 0;
-    for (int i = 0; i < len; i++)
-        h = h * 31 + (unsigned char)s[i];
+    unsigned int h = 2166136261u;
+    for (int i = 0; i < len; i++) {
+        h ^= (unsigned char)s[i];
+        h *= 16777619u;
+    }
     return h & (HASH_SIZE - 1);
 }
 
@@ -64,6 +70,12 @@ DerepResult* derep_fastq_c(const char *filepath) {
         for (int i = 0; i < slen; i++)
             if (line[i] >= 'a' && line[i] <= 'z') line[i] -= 32;
 
+        if (slen >= MAX_SEQ_LEN) {
+            fprintf(stderr, "derep_fastq_c: sequence length %d exceeds MAX_SEQ_LEN %d, truncating\n",
+                    slen, MAX_SEQ_LEN);
+            slen = MAX_SEQ_LEN - 1;
+            line[slen] = '\0';
+        }
         if (slen > max_len) max_len = slen;
 
         /* Line 3: + (skip) */
