@@ -8,6 +8,8 @@ CXXFLAGS = -O3 -fPIC -std=c++11 -DNO_RCPP -DNDEBUG -march=native -fopenmp -Wno-f
 
 # Source files for standalone build (excludes Rmain.cpp, RcppExports.cpp,
 # taxonomy.cpp, chimera.cpp, evaluate.cpp, filter.cpp)
+CSRCS = src/derep.c
+
 SRCS = src/dada2_capi.cpp \
        src/cluster.cpp \
        src/containers.cpp \
@@ -38,8 +40,13 @@ endif
 
 all: libdada2.so
 
-libdada2.so: $(OBJS) $(CUDA_OBJ)
-	$(CXX) -shared -o $@ $^ $(LDFLAGS) -fopenmp
+COBJS = $(CSRCS:.c=.o)
+
+libdada2.so: $(OBJS) $(COBJS) $(CUDA_OBJ)
+	$(CXX) -shared -o $@ $^ $(LDFLAGS) -fopenmp -lz
+
+src/%.o: src/%.c
+	gcc -O3 -fPIC -DNDEBUG -march=native -c $< -o $@
 
 src/%.o: src/%.cpp
 	$(CXX) $(CXXFLAGS) -c $< -o $@
