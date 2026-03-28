@@ -5,8 +5,27 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
-#include <Rcpp.h>
-#include <RcppParallel.h>
+#include <stdint.h>
+
+#ifdef NO_RCPP
+  #include <vector>
+  #include <cstdio>
+  #include <cstdlib>
+  #include <cstdarg>
+  #define Rprintf printf
+  inline void dada2_error(const char *fmt, ...) {
+    va_list args; va_start(args, fmt);
+    vfprintf(stderr, fmt, args); va_end(args);
+    fprintf(stderr, "\n"); exit(1);
+  }
+  // Variadic macro trick to handle Rcpp::stop format strings
+  #define Rcpp_stop(...) dada2_error(__VA_ARGS__)
+#else
+  #include <Rcpp.h>
+  #include <RcppParallel.h>
+  #define Rcpp_stop Rcpp::stop
+#endif
+
 #include <unordered_map>
 #include <unordered_set>
 //#include <gsl/gsl_cdf.h>
@@ -139,8 +158,12 @@ Raw *bi_pop_raw(Bi *bi, unsigned int r);
 unsigned int bi_add_raw(Bi *bi, Raw *raw);
 
 // methods implemented in cluster.cpp
+#ifndef NO_RCPP
 void b_compare(B *b, unsigned int i, Rcpp::NumericMatrix errMat, int match, int mismatch, int gap_pen, int homo_gap_pen, bool use_kmers, double kdist_cutoff, int band_size, bool vectorized_alignment, int SSE, bool gapless, bool greedy, bool verbose);
 void b_compare_parallel(B *b, unsigned int i, Rcpp::NumericMatrix errMat, int match, int mismatch, int gap_pen, int homo_gap_pen, bool use_kmers, double kdist_cutoff, int band_size, bool vectorized_alignment, int SSE, bool gapless, bool greedy, bool verbose);
+#else
+void b_compare_omp(B *b, unsigned int i, double *err_mat, unsigned int ncol, int match, int mismatch, int gap_pen, int homo_gap_pen, bool use_kmers, double kdist_cutoff, int band_size, bool vectorized_alignment, int SSE, bool gapless, bool greedy, bool verbose);
+#endif
 bool b_shuffle2(B *b);
 // void b_p_update_parallel(B *b);
 int b_bud(B *b, double min_fold, int min_hamming, int min_abund, bool verbose);
@@ -186,15 +209,29 @@ double kord_dist_SSEi(uint16_t *kord1, int len1, uint16_t *kord2, int len2, int 
 void b_p_update(B *b, bool greedy, bool detect_singletons);
 double calc_pA(int reads, double E_reads, bool prior);
 double get_pA(Raw *raw, Bi *bi, bool detect_singletons);
+#ifndef NO_RCPP
 double compute_lambda(Raw *raw, Sub *sub, Rcpp::NumericMatrix errMat, bool use_quals, unsigned int ncol);
+#endif
 double compute_lambda_ts(Raw *raw, Sub *sub, unsigned int ncol, double *err_mat, bool use_quals);
 double get_self(char *seq, double err[4][4]);
 
+// methods implemented in cluster.cpp (GPU)
+#ifdef HAVE_CUDA
+#include "cuda_compare.h"
+void b_compare_gpu(B *b, unsigned int i, double *err_mat, unsigned int ncol,
+                   GpuContext *gpu_ctx, unsigned int max_seqlen,
+                   int match, int mismatch, int gap_pen,
+                   bool use_kmers, double kdist_cutoff, int band_size,
+                   bool gapless, bool greedy, bool verbose);
+#endif
+
 // methods implemented in error.cpp
+#ifndef NO_RCPP
 Rcpp::DataFrame b_make_clustering_df(B *b, Sub **subs, Sub **birth_subs, bool has_quals);
 Rcpp::IntegerMatrix b_make_transition_by_quality_matrix(B *b, Sub **subs, bool has_quals, int ncol);
 Rcpp::NumericMatrix b_make_cluster_quality_matrix(B *b, Sub **subs, bool has_quals, unsigned int seqlen);
 Rcpp::DataFrame b_make_positional_substitution_df(B *b, Sub **subs, unsigned int seqlen, Rcpp::NumericMatrix errMat, bool use_quals);
 Rcpp::DataFrame b_make_birth_subs_df(B *b, Sub **birth_subs, bool has_quals);
+#endif
 
 #endif

@@ -1,9 +1,12 @@
+#ifndef NO_RCPP
 #include <Rcpp.h>
-#include "dada.h"
 using namespace Rcpp;
+#endif
+#include "dada.h"
 
 // [[Rcpp::interfaces(r, cpp)]]
 
+#ifndef NO_RCPP
 // This function constructs the output "clustering" data.frame for the dada(...) function.
 // This contains core and diagnostic information on each partition (or cluster, or Bi).
 Rcpp::DataFrame b_make_clustering_df(B *b, Sub **subs, Sub **birth_subs, bool has_quals) {
@@ -298,3 +301,4 @@ Rcpp::DataFrame b_make_birth_subs_df(B *b, Sub **birth_subs, bool has_quals) {
   }
   return(Rcpp::DataFrame::create(_["pos"] = bs_pos, _["ref"] = bs_nt0, _["sub"] = bs_nt1, _["qual"] = bs_qual, _["clust"] = bs_clust));
 }
+#endif /* \!NO_RCPP */

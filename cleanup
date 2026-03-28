@@ -1,0 +1,6 @@
+#!/bin/sh
+# Cleanup script for dada2 GPU build artifacts
+rm -f src/Makevars
+rm -f src/*.o
+rm -f src/*.so
+rm -f src/*.dll

@@ -1,6 +1,10 @@
+#ifndef NO_RCPP
 #include <Rcpp.h>
+#endif
 #include "dada.h"
+#ifndef NO_RCPP
 using namespace Rcpp;
+#endif
 
 #define MIN(a,b) (((a)<(b))?(a):(b))
 
@@ -97,10 +101,31 @@ char **nwalign_vectorized2(const char *s1, size_t len1, const char *s2, size_t l
   //  ncol = 3 + (len1+len2+1)/2; // 3 = left boundary + center + right boundary !!!
   ncol = 2 + start_col + ((len2-len1+band)<len2 ? (len2-len1+band) : len2)/2;
   nrow = len1 + len2 + 1;
+#ifdef NO_RCPP
+  // Thread-local reusable buffers to avoid malloc contention under OpenMP.
+  // Max size: 2*SEQLEN+1 rows, ~2*band+6 cols. For SEQLEN=9999 this is large,
+  // but typical amplicon data is <=600bp so we use a reasonable static size
+  // and fall back to malloc for larger.
+  static const size_t TL_MAX = 1201UL * 70UL; // 601 rows * 70 cols (covers 300bp, band=32)
+  static thread_local int16_t tl_d[TL_MAX];
+  static thread_local int16_t tl_p[TL_MAX];
+  static thread_local int16_t tl_db[70];
+  int16_t *d, *p, *diag_buf;
+  bool use_tl = (ncol * nrow <= TL_MAX && ncol <= 70);
+  if (use_tl) {
+    d = tl_d; p = tl_p; diag_buf = tl_db;
+  } else {
+    d = (int16_t *) malloc(ncol * nrow * sizeof(int16_t));
+    p = (int16_t *) malloc(ncol * nrow * sizeof(int16_t));
+    diag_buf = (int16_t *) malloc(ncol * sizeof(int16_t));
+    if (d == NULL || p == NULL || diag_buf == NULL)  Rcpp_stop("Memory allocation failed.");
+  }
+#else
   int16_t *d = (int16_t *) malloc(ncol * nrow * sizeof(int16_t));
   int16_t *p = (int16_t *) malloc(ncol * nrow * sizeof(int16_t));
   int16_t *diag_buf = (int16_t *) malloc(ncol * sizeof(int16_t));
-  if (d == NULL || p == NULL || diag_buf == NULL)  Rcpp::stop("Memory allocation failed.");
+  if (d == NULL || p == NULL || diag_buf == NULL)  Rcpp_stop("Memory allocation failed.");
+#endif
   
   // For banding issues later on
   int16_t fill_val = INT16_MIN - MIN(MIN(mismatch, gap_p), MIN(match, 0));
@@ -252,9 +277,22 @@ char **nwalign_vectorized2(const char *s1, size_t len1, const char *s2, size_t l
 //    Rprintf("Score: %d\n", d[(len1+len2)*ncol + (2*start_col+len2-len1)/2]);
 //  }
 
+#ifdef NO_RCPP
+  static thread_local char tl_al0[2 * 600 + 2]; // covers 300bp seqs
+  static thread_local char tl_al1[2 * 600 + 2];
+  char *al0, *al1;
+  bool use_tl_al = (nrow + 1 <= sizeof(tl_al0));
+  if (use_tl_al) { al0 = tl_al0; al1 = tl_al1; }
+  else {
+    al0 = (char *) malloc((nrow+1) * sizeof(char));
+    al1 = (char *) malloc((nrow+1) * sizeof(char));
+    if(al0 == NULL || al1 == NULL) Rcpp_stop("Memory allocation failed.");
+  }
+#else
   char *al0 = (char *) malloc((nrow+1) * sizeof(char));
   char *al1 = (char *) malloc((nrow+1) * sizeof(char));
-  if(al0 == NULL || al1 == NULL) Rcpp::stop("Memory allocation failed.");
+  if(al0 == NULL || al1 == NULL) Rcpp_stop("Memory allocation failed.");
+#endif
   
   // Trace back over p to form the alignment.
   size_t len_al = 0;
@@ -277,17 +315,21 @@ char **nwalign_vectorized2(const char *s1, size_t len1, const char *s2, size_t l
         break;
       default:
         Rprintf("len1/2=(%i, %i), nrow,ncol=(%i,%i), ij=(%i,%i), rc=(%i,%i), d[][]=%i, p[][]=%i\n", len1, len2, nrow, ncol, i,j,i+j,(2*start_col+j-i)/2, d[(i+j)*ncol + (2*start_col+j-i)/2], p[(i+j)*ncol + (2*start_col+j-i)/2]);
-        Rcpp::stop("N-W Align out of range.");
+        Rcpp_stop("N-W Align out of range.");
     }
     len_al++;
   }
   al0[len_al] = '\0';
   al1[len_al] = '\0';
   
-  // Free DP objects
+  // Free DP objects (skip for thread-local buffers)
+#ifdef NO_RCPP
+  if (!use_tl) { free(d); free(p); free(diag_buf); }
+#else
   free(d);
   free(p);
   free(diag_buf);
+#endif
   
   // Return to input ordering
   if(swap) {
@@ -298,10 +340,10 @@ char **nwalign_vectorized2(const char *s1, size_t len1, const char *s2, size_t l
   
   // Allocate memory to alignment strings.
   char **al = (char **) malloc( 2 * sizeof(char *) ); //E
-  if (al == NULL)  Rcpp::stop("Failed memory allocation.");
+  if (al == NULL)  Rcpp_stop("Failed memory allocation.");
   al[0] = (char *) malloc(len_al+1); //E
   al[1] = (char *) malloc(len_al+1); //E
-  if (al[0] == NULL || al[1] == NULL)  Rcpp::stop("Failed memory allocation.");
+  if (al[0] == NULL || al[1] == NULL)  Rcpp_stop("Failed memory allocation.");
   
   // Reverse the alignment strings (since traced backwards).
   for (i=0;i<len_al;i++) {
@@ -311,18 +353,23 @@ char **nwalign_vectorized2(const char *s1, size_t len1, const char *s2, size_t l
   al[0][len_al] = '\0';
   al[1][len_al] = '\0';
   
+#ifdef NO_RCPP
+  if (!use_tl_al) { free(al0); free(al1); }
+#else
   free(al0);
   free(al1);
-  
+#endif
+
   return al;
 }
 
+#ifndef NO_RCPP
 // [[Rcpp::export]]
 Rcpp::CharacterVector C_nwvec(std::vector<std::string> s1, std::vector<std::string> s2, int16_t match, int16_t mismatch, int16_t gap_p, int band, bool endsfree) {
   char **al;
   int i;
   if(s1.size() != s2.size()) {
-    Rcpp::stop("Character vectors to be aligned must be of equal length.");
+    Rcpp_stop("Character vectors to be aligned must be of equal length.");
   }
   Rcpp::CharacterVector rval(s1.size()*2);
   
@@ -341,3 +388,4 @@ Rcpp::CharacterVector C_nwvec(std::vector<std::string> s1, std::vector<std::stri
   }
   return(rval);
 }
+#endif /* \!NO_RCPP */

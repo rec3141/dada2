@@ -1,0 +1,140 @@
+#!/bin/sh
+# configure script for dada2 GPU acceleration
+# Detects CUDA toolkit and generates src/Makevars
+
+echo "* checking for CUDA toolkit..."
+
+# Find CUDA_HOME
+# First check PATH for nvcc (works with conda environments)
+if [ -z "$CUDA_HOME" ]; then
+  NVCC_PATH=$(command -v nvcc 2>/dev/null)
+  if [ -n "$NVCC_PATH" ]; then
+    # Resolve symlinks to find the real path
+    NVCC_REAL=$(readlink -f "$NVCC_PATH" 2>/dev/null || echo "$NVCC_PATH")
+    CUDA_HOME=$(dirname $(dirname "$NVCC_REAL"))
+  fi
+fi
+
+# Try common locations
+if [ -z "$CUDA_HOME" ]; then
+  for dir in "$CONDA_PREFIX" /usr/local/cuda /usr/local/cuda-* /opt/cuda; do
+    if [ -x "$dir/bin/nvcc" ]; then
+      CUDA_HOME="$dir"
+      break
+    fi
+  done
+fi
+
+HAVE_CUDA=0
+
+if [ -n "$CUDA_HOME" ] && [ -x "$CUDA_HOME/bin/nvcc" ]; then
+  echo "  Found nvcc at: $CUDA_HOME/bin/nvcc"
+
+  # Test compilation
+  echo "  Testing CUDA compilation..."
+  TMPFILE=$(mktemp /tmp/cuda_test_XXXXXX.cu)
+  cat > "$TMPFILE" << 'EOF'
+#include <cuda_runtime.h>
+int main() {
+  int count;
+  cudaGetDeviceCount(&count);
+  return 0;
+}
+EOF
+
+  # Determine include path (conda puts headers in targets/)
+  CUDA_INCL=""
+  if [ -f "$CUDA_HOME/targets/x86_64-linux/include/cuda_runtime.h" ]; then
+    CUDA_INCL="-I$CUDA_HOME/targets/x86_64-linux/include"
+  elif [ -f "$CUDA_HOME/include/cuda_runtime.h" ]; then
+    CUDA_INCL="-I$CUDA_HOME/include"
+  fi
+
+  if "$CUDA_HOME/bin/nvcc" $CUDA_INCL -c "$TMPFILE" -o "${TMPFILE}.o" 2>/dev/null; then
+    HAVE_CUDA=1
+    echo "  CUDA compilation successful."
+  else
+    echo "  CUDA compilation failed. Building without GPU support."
+  fi
+  rm -f "$TMPFILE" "${TMPFILE}.o"
+else
+  echo "  CUDA toolkit not found. Building without GPU support."
+fi
+
+# Detect GPU architecture if possible
+CUDA_ARCH_FLAGS=""
+if [ "$HAVE_CUDA" = "1" ]; then
+  # Try to detect GPU arch at configure time
+  TMPFILE=$(mktemp /tmp/cuda_arch_XXXXXX.cu)
+  cat > "$TMPFILE" << 'EOF'
+#include <cuda_runtime.h>
+#include <stdio.h>
+int main() {
+  cudaDeviceProp prop;
+  if(cudaGetDeviceProperties(&prop, 0) == cudaSuccess) {
+    printf("%d%d", prop.major, prop.minor);
+  }
+  return 0;
+}
+EOF
+  ARCH=$("$CUDA_HOME/bin/nvcc" $CUDA_INCL "$TMPFILE" -o "${TMPFILE}.out" 2>/dev/null && "${TMPFILE}.out" 2>/dev/null)
+  rm -f "$TMPFILE" "${TMPFILE}.out"
+
+  if [ -n "$ARCH" ]; then
+    echo "  Detected GPU compute capability: $ARCH"
+    CUDA_ARCH_FLAGS="-gencode arch=compute_${ARCH},code=sm_${ARCH}"
+  else
+    # Fallback to common architectures
+    echo "  Could not detect GPU arch, using defaults (sm_70, sm_80, sm_89)"
+    CUDA_ARCH_FLAGS="-gencode arch=compute_70,code=sm_70 -gencode arch=compute_80,code=sm_80 -gencode arch=compute_89,code=sm_89"
+  fi
+fi
+
+# Generate src/Makevars
+echo "* generating src/Makevars..."
+
+if [ "$HAVE_CUDA" = "1" ]; then
+  # Determine lib path
+  CUDA_LIB_DIR="$CUDA_HOME/lib64"
+  if [ ! -d "$CUDA_LIB_DIR" ]; then
+    CUDA_LIB_DIR="$CUDA_HOME/lib"
+  fi
+
+  # Determine include flags
+  CUDA_INC_FLAG=""
+  if [ -n "$CUDA_INCL" ]; then
+    CUDA_INC_FLAG="$CUDA_INCL"
+  fi
+
+  cat > src/Makevars << MAKEVARS_EOF
+PKG_LIBS += \$(shell \${R_HOME}/bin/Rscript -e "RcppParallel::RcppParallelLibs()")
+CXX_STD = CXX11
+
+# CUDA support (auto-detected by configure)
+CUDA_HOME = ${CUDA_HOME}
+NVCC = \$(CUDA_HOME)/bin/nvcc
+CUDA_ARCH = ${CUDA_ARCH_FLAGS}
+CUDA_CFLAGS = -Xcompiler -fPIC -O2 \$(CUDA_ARCH) ${CUDA_INC_FLAG}
+CUDA_LIBS = -L${CUDA_LIB_DIR} -Wl,-rpath,${CUDA_LIB_DIR} -Wl,--no-as-needed -lcudart -Wl,--as-needed
+
+PKG_CPPFLAGS += -DHAVE_CUDA ${CUDA_INC_FLAG}
+PKG_LIBS += \$(CUDA_LIBS) cuda_compare.o
+
+.PHONY: cuda_obj
+all: cuda_obj
+
+cuda_obj: cuda_compare.o
+
+cuda_compare.o: cuda_compare.cu cuda_compare.h
+	\$(NVCC) \$(CUDA_CFLAGS) -c \$< -o \$@
+MAKEVARS_EOF
+  echo "  GPU support enabled."
+else
+  cat > src/Makevars << 'MAKEVARS_EOF'
+PKG_LIBS += $(shell ${R_HOME}/bin/Rscript -e "RcppParallel::RcppParallelLibs()")
+CXX_STD = CXX11
+MAKEVARS_EOF
+  echo "  GPU support disabled (CPU-only build)."
+fi
+
+echo "* done."

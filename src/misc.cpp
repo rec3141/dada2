@@ -107,7 +107,7 @@ void ntcpy(char *oseq, const char *iseq) {
 /* Convenience function for diagnostic output. */
 char *ntstr(const char *iseq) {
   char *oseq = (char *) malloc(strlen(iseq)+1); //E
-  if (oseq == NULL)  Rcpp::stop("Memory allocation failed!\n");
+  if (oseq == NULL)  Rcpp_stop("Memory allocation failed!\n");
   
   ntcpy(oseq, iseq);
   return oseq;
@@ -116,7 +116,7 @@ char *ntstr(const char *iseq) {
 /* Convenience function for diagnostic input. */
 char *intstr(const char *iseq) {
   char *oseq = (char *) malloc(strlen(iseq)+1); //E
-  if (oseq == NULL)  Rcpp::stop("Memory allocation failed!\n");
+  if (oseq == NULL)  Rcpp_stop("Memory allocation failed!\n");
   
   strcpy(oseq, iseq);
   nt2int(oseq, oseq);

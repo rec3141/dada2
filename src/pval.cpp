@@ -2,7 +2,9 @@
 Pval.cpp contains the functions related to calculating the abundance pval in DADA2.
 */
 
+#ifndef NO_RCPP
 #include <Rcpp.h>
+#endif
 #include "dada.h"
 
 // [[Rcpp::interfaces(r, cpp)]]
@@ -39,27 +41,101 @@ void b_p_update(B *b, bool greedy, bool detect_singletons) {
   } // for(i=0;i<b->nclust;i++)
 }
 
+// Standalone Poisson survival function: P(X > k; lambda) = 1 - P(X <= k; lambda)
+// Uses the regularized incomplete gamma function relationship:
+//   P(X <= k; lambda) = Q(k+1, lambda) = 1 - P(k+1, lambda)
+// where P(a,x) is the regularized lower incomplete gamma function.
+// For large k or lambda, uses the series/continued fraction from Numerical Recipes.
+#ifdef NO_RCPP
+static double ppois_upper(int k, double lambda) {
+  // P(X > k; lambda) = P(k+1, lambda) where P is regularized lower gamma
+  // Using the series expansion: P(a,x) = e^{-x} * sum_{n=0}^{inf} x^n / Gamma(a+n+1) * Gamma(a)
+  // Equivalently, use the relationship to the incomplete gamma function via lgamma
+
+  if(lambda <= 0.0) return 0.0;
+  if(k < 0) return 1.0;
+
+  double a = (double)(k + 1);
+  double x = lambda;
+
+  // For small x relative to a, use series expansion for lower regularized gamma
+  // For large x relative to a, use continued fraction for upper regularized gamma
+
+  if(x < a + 1.0) {
+    // Series representation of P(a,x) = lower regularized gamma
+    // P(a,x) = e^{-x} x^a / Gamma(a) * sum_{n=0}^{inf} x^n / (a*(a+1)*...*(a+n))
+    double sum = 1.0 / a;
+    double term = 1.0 / a;
+    for(int n = 1; n < 1000; n++) {
+      term *= x / (a + n);
+      sum += term;
+      if(fabs(term) < fabs(sum) * 1e-15) break;
+    }
+    double log_p = -x + a * log(x) - lgamma(a) + log(sum);
+    double lower_p = exp(log_p);
+    if(lower_p > 1.0) lower_p = 1.0;
+    if(lower_p < 0.0) lower_p = 0.0;
+    return lower_p;  // P(X > k) = P(a, x) = lower regularized gamma
+  } else {
+    // Continued fraction for Q(a,x) = 1 - P(a,x) = upper regularized gamma
+    // Using Lentz's method
+    double f = 1.0;
+    double c = 1.0;
+    double d = x - a + 1.0;
+    if(fabs(d) < 1e-30) d = 1e-30;
+    d = 1.0 / d;
+    f = d;
+    for(int n = 1; n < 1000; n++) {
+      double an = n * (a - n);
+      double bn = x - a + 1.0 + 2.0 * n;
+      d = bn + an * d;
+      if(fabs(d) < 1e-30) d = 1e-30;
+      c = bn + an / c;
+      if(fabs(c) < 1e-30) c = 1e-30;
+      d = 1.0 / d;
+      double delta = d * c;
+      f *= delta;
+      if(fabs(delta - 1.0) < 1e-15) break;
+    }
+    double log_q = -x + a * log(x) - lgamma(a) + log(f) - log(x);
+    // Avoiding precision issues: use log1p if log_q is close to 0
+    // Wait: we need to be more careful. Let me recalculate.
+    // Q(a,x) = e^{-x} * x^a / Gamma(a) * CF
+    // where CF = f/x from above
+    double log_upper = -x + a * log(x) - lgamma(a) + log(fabs(f)) - log(x);
+    double upper_q = exp(log_upper);
+    if(upper_q > 1.0) upper_q = 1.0;
+    if(upper_q < 0.0) upper_q = 0.0;
+    // P(X > k) = P(a,x) = 1 - Q(a,x)
+    return 1.0 - upper_q;
+  }
+}
+#endif
+
 // Calculate abundance pval for given reads and expected number of reads
 // Pval is conditional on sequnce being present, unless prior evidence is true
 double calc_pA(int reads, double E_reads, bool prior) {
   double norm, pval=1.;
-  
-  // Calculate pval from poisson cdf.
+
+#ifdef NO_RCPP
+  // Standalone: P(X > reads-1; E_reads) = P(X >= reads; E_reads)
+  pval = ppois_upper(reads - 1, E_reads);
+#else
+  // R/Rcpp version
   Rcpp::IntegerVector n_repeats(1);
-  n_repeats(0) = reads-1; // -1 since strict > being calculated, and want to include the observed count
-  Rcpp::NumericVector res = Rcpp::ppois(n_repeats, E_reads, false);  // lower.tail = false: P(X > x)
+  n_repeats(0) = reads-1;
+  Rcpp::NumericVector res = Rcpp::ppois(n_repeats, E_reads, false);
   pval = Rcpp::as<double>(res);
+#endif
 
   if(!prior) {
-    // Calculate norm (since conditioning on sequence being present).
     norm = (1.0 - exp(-E_reads));
     if(norm < TAIL_APPROX_CUTOFF) {
-      norm = E_reads - 0.5*E_reads*E_reads; 
-      // Assumption: TAIL_APPROX_CUTOFF is small enough to terminate taylor expansion at 2nd order
+      norm = E_reads - 0.5*E_reads*E_reads;
     }
     pval = pval/norm;
   }
-  
+
   return pval;
 }
 
@@ -88,6 +164,7 @@ double get_pA(Raw *raw, Bi *bi, bool detect_singletons) {
   return pval;
 }
 
+#ifndef NO_RCPP
 // This calculates lambda from a lookup table index by transition (row) and rounded quality (col)
 double compute_lambda(Raw *raw, Sub *sub, Rcpp::NumericMatrix errMat, bool use_quals, unsigned int ncol) {
   int s, pos0, pos1, nti0, nti1, len1;
@@ -107,7 +184,7 @@ double compute_lambda(Raw *raw, Sub *sub, Rcpp::NumericMatrix errMat, bool use_q
     if(nti1 == 0 || nti1 == 1 || nti1 == 2 || nti1 == 3) {
       tvec[pos1] = nti1*4 + nti1;
     } else {
-      Rcpp::stop("Non-ACGT sequences in compute_lambda.");
+      Rcpp_stop("Non-ACGT sequences in compute_lambda.");
     }
     if(use_quals) {
       // Turn quality into the index in the array
@@ -120,9 +197,9 @@ double compute_lambda(Raw *raw, Sub *sub, Rcpp::NumericMatrix errMat, bool use_q
   // Now fix the ones where subs occurred
   for(s=0;s<sub->nsubs;s++) {
     pos0 = sub->pos[s];
-    if(pos0 < 0 || pos0 >= sub->len0) { Rcpp::stop("CL: Bad pos0: %i (len0=%i).", pos0, sub->len0); }
+    if(pos0 < 0 || pos0 >= sub->len0) { Rcpp_stop("CL: Bad pos0: %i (len0=%i).", pos0, sub->len0); }
     pos1 = sub->map[sub->pos[s]];
-    if(pos1 < 0 || pos1 >= len1) { Rcpp::stop("CL: Bad pos1: %i (len1=%i).", pos1, len1); }
+    if(pos1 < 0 || pos1 >= len1) { Rcpp_stop("CL: Bad pos1: %i (len1=%i).", pos1, len1); }
     
     nti0 = ((int) sub->nt0[s]) - 1;
     nti1 = ((int) sub->nt1[s]) - 1;
@@ -135,10 +212,11 @@ double compute_lambda(Raw *raw, Sub *sub, Rcpp::NumericMatrix errMat, bool use_q
     lambda = lambda * errMat(tvec[pos1], qind[pos1]);
   }
   
-  if(lambda < 0 || lambda > 1) { Rcpp::stop("Bad lambda."); }
-  
+  if(lambda < 0 || lambda > 1) { Rcpp_stop("Bad lambda."); }
+
   return lambda;
 }
+#endif /* !NO_RCPP */
 
 // This calculates lambda from a lookup table index by transition (row) and rounded quality (col)
 double compute_lambda_ts(Raw *raw, Sub *sub, unsigned int ncol, double *err_mat, bool use_quals) {
@@ -159,7 +237,7 @@ double compute_lambda_ts(Raw *raw, Sub *sub, unsigned int ncol, double *err_mat,
     if(nti1 == 0 || nti1 == 1 || nti1 == 2 || nti1 == 3) {
       tvec[pos1] = nti1*4 + nti1;
     } else {
-      Rcpp::stop("Non-ACGT sequences in compute_lambda.");
+      Rcpp_stop("Non-ACGT sequences in compute_lambda.");
     }
     if(use_quals) {
       // Turn quality into the index in the array
@@ -169,16 +247,16 @@ double compute_lambda_ts(Raw *raw, Sub *sub, unsigned int ncol, double *err_mat,
     }
     
     if( qind[pos1] > (ncol-1) ) {
-      Rcpp::stop("Rounded quality exceeded range of err lookup table.");
+      Rcpp_stop("Rounded quality exceeded range of err lookup table.");
     }
   }
   
   // Now fix the ones where subs occurred
   for(s=0;s<sub->nsubs;s++) {
     pos0 = sub->pos[s];
-    if(pos0 < 0 || pos0 >= sub->len0) { Rcpp::stop("CL: Bad pos0: %i (len0=%i).", pos0, sub->len0); }
+    if(pos0 < 0 || pos0 >= sub->len0) { Rcpp_stop("CL: Bad pos0: %i (len0=%i).", pos0, sub->len0); }
     pos1 = sub->map[sub->pos[s]];
-    if(pos1 < 0 || pos1 >= len1) { Rcpp::stop("CL: Bad pos1: %i (len1=%i).", pos1, len1); }
+    if(pos1 < 0 || pos1 >= len1) { Rcpp_stop("CL: Bad pos1: %i (len1=%i).", pos1, len1); }
     
     nti0 = ((int) sub->nt0[s]) - 1;
     nti1 = ((int) sub->nt1[s]) - 1;
@@ -191,7 +269,7 @@ double compute_lambda_ts(Raw *raw, Sub *sub, unsigned int ncol, double *err_mat,
     lambda = lambda * err_mat[tvec[pos1]*ncol+qind[pos1]];
   }
   
-  if(lambda < 0 || lambda > 1) { Rcpp::stop("Bad lambda."); }
+  if(lambda < 0 || lambda > 1) { Rcpp_stop("Bad lambda."); }
   
   return lambda;
 }
@@ -239,8 +317,8 @@ double compute_lambda_ts(Raw *raw, Sub *sub, unsigned int ncol, double *err_mat,
 // log_p is false
 double ppois(double x, double lambda, int lower_tail, int log_p)
 {
-  if(lambda <= 0.) Rcpp::stop("Lambda must be > 0.");
-  if (x < 0) Rcpp::stop("x must be >= 0.");
+  if(lambda <= 0.) Rcpp_stop("Lambda must be > 0.");
+  if (x < 0) Rcpp_stop("x must be >= 0.");
   x = floor(x + 1e-7); // Why?
   
   return pgamma(lambda, x + 1, 1., !lower_tail, log_p);
@@ -249,7 +327,7 @@ double ppois(double x, double lambda, int lower_tail, int log_p)
 // x > 0, alph is an integer and >=2, scale=1., lower_tail=true, log_p=false
 double pgamma(double x, double alph, double scale, int lower_tail, int log_p)
 {
-  if(alph <= 0. || scale <= 0.) Rcpp::stop("alph > 0 and scale > 0 are required.")
+  if(alph <= 0. || scale <= 0.) Rcpp_stop("alph > 0 and scale > 0 are required.")
   x /= scale;
   return pgamma_raw (x, alph, lower_tail, log_p);
 }

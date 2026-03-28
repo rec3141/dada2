@@ -16,12 +16,16 @@ using namespace Rcpp;
 //' @useDynLib dada2
 //' @importFrom Rcpp evalCpp
 
-B *run_dada(Raw **raws, int nraw, Rcpp::NumericMatrix errMat, 
-            int match, int mismatch, int gap_pen, int homo_gap_pen, bool use_kmers, double kdist_cutoff, int band_size, 
-            double omegaA, double omegaP, bool detect_singletons, 
-            int max_clust, double min_fold, int min_hamming, int min_abund, 
-            bool use_quals, bool final_consensus, bool vectorized_alignment, bool multithread, bool verbose, 
-            int SSE, bool gapless, bool greedy);
+B *run_dada(Raw **raws, int nraw, Rcpp::NumericMatrix errMat,
+            int match, int mismatch, int gap_pen, int homo_gap_pen, bool use_kmers, double kdist_cutoff, int band_size,
+            double omegaA, double omegaP, bool detect_singletons,
+            int max_clust, double min_fold, int min_hamming, int min_abund,
+            bool use_quals, bool final_consensus, bool vectorized_alignment, bool multithread, bool verbose,
+            int SSE, bool gapless, bool greedy
+#ifdef HAVE_CUDA
+            , GpuContext *gpu_ctx, unsigned int gpu_max_seqlen
+#endif
+            );
 
 //------------------------------------------------------------------
 // C interface to run DADA on the provided unique sequences/abundance pairs. 
@@ -162,12 +166,63 @@ Rcpp::List dada_uniques(std::vector< std::string > seqs, std::vector<int> abunda
     }
   }
   
+  /********** GPU SETUP *********/
+#ifdef HAVE_CUDA
+  GpuContext *gpu_ctx = NULL;
+  // Use GPU if available and homo_gap == gap (GPU doesn't support homo_gap_pen)
+  bool use_gpu = gpu_available() && (homo_gap == gap);
+  if(use_gpu) {
+    if(verbose) { Rprintf("GPU: Initializing CUDA context for %i sequences (maxlen=%i)...\n", nraw, maxlen); }
+    gpu_ctx = gpu_context_create(nraw, maxlen);
+    if(gpu_ctx) {
+      // Pack sequences into contiguous padded arrays for GPU
+      char *all_seqs = (char *) calloc((size_t)nraw * maxlen, 1);
+      uint8_t *all_quals = (uint8_t *) calloc((size_t)nraw * maxlen, 1);
+      unsigned int *lengths = (unsigned int *) malloc(nraw * sizeof(unsigned int));
+      unsigned int *reads_arr = (unsigned int *) malloc(nraw * sizeof(unsigned int));
+      if(!all_seqs || !all_quals || !lengths || !reads_arr) {
+        Rcpp::stop("GPU memory allocation failed.");
+      }
+      for(index = 0; index < nraw; index++) {
+        memcpy(&all_seqs[(size_t)index * maxlen], raws[index]->seq, raws[index]->length);
+        if(raws[index]->qual) {
+          memcpy(&all_quals[(size_t)index * maxlen], raws[index]->qual, raws[index]->length);
+        }
+        lengths[index] = raws[index]->length;
+        reads_arr[index] = raws[index]->reads;
+      }
+      gpu_upload_raws(gpu_ctx, all_seqs, all_quals,
+                      use_kmers ? k8 : NULL,
+                      lengths, reads_arr, nraw);
+      free(all_seqs);
+      free(all_quals);
+      free(lengths);
+      free(reads_arr);
+      if(verbose) { Rprintf("GPU: Data uploaded successfully.\n"); }
+    } else {
+      if(verbose) { Rprintf("GPU: Context creation failed, falling back to CPU.\n"); }
+      use_gpu = false;
+    }
+  }
+#endif
+
   /********** RUN DADA *********/
-  B *bb = run_dada(raws, nraw, err, 
-                   match, mismatch, gap, homo_gap, use_kmers, kdist_cutoff, band_size, 
+  B *bb = run_dada(raws, nraw, err,
+                   match, mismatch, gap, homo_gap, use_kmers, kdist_cutoff, band_size,
                    omegaA, omegaP, detect_singletons,
-                   max_clust, min_fold, min_hamming, min_abund, use_quals, final_consensus, 
-                   vectorized_alignment, multithread, verbose, SSE, gapless, greedy);
+                   max_clust, min_fold, min_hamming, min_abund, use_quals, final_consensus,
+                   vectorized_alignment, multithread, verbose, SSE, gapless, greedy
+#ifdef HAVE_CUDA
+                   , gpu_ctx, maxlen
+#endif
+                   );
+
+#ifdef HAVE_CUDA
+  if(gpu_ctx) {
+    gpu_context_destroy(gpu_ctx);
+    gpu_ctx = NULL;
+  }
+#endif
 
   /********** MAKE OUTPUT *********/
   // Create subs for all the relevant alignments
@@ -294,29 +349,64 @@ Rcpp::List dada_uniques(std::vector< std::string > seqs, std::vector<int> abunda
   return Rcpp::List::create(_["clustering"] = df_clustering, _["birth_subs"] = df_birth_subs, _["subqual"] = mat_trans, _["clusterquals"] = mat_quals, _["map"] = Rmap, _["pval"] = Rpraw);
 }
 
-B *run_dada(Raw **raws, int nraw, Rcpp::NumericMatrix errMat, 
-            int match, int mismatch, int gap_pen, int homo_gap_pen, bool use_kmers, double kdist_cutoff, int band_size, 
+B *run_dada(Raw **raws, int nraw, Rcpp::NumericMatrix errMat,
+            int match, int mismatch, int gap_pen, int homo_gap_pen, bool use_kmers, double kdist_cutoff, int band_size,
             double omegaA, double omegaP, bool detect_singletons,
-            int max_clust, double min_fold, int min_hamming, int min_abund, 
-            bool use_quals, bool final_consensus, bool vectorized_alignment, bool multithread, bool verbose, 
-            int SSE, bool gapless, bool greedy) {
+            int max_clust, double min_fold, int min_hamming, int min_abund,
+            bool use_quals, bool final_consensus, bool vectorized_alignment, bool multithread, bool verbose,
+            int SSE, bool gapless, bool greedy
+#ifdef HAVE_CUDA
+            , GpuContext *gpu_ctx, unsigned int gpu_max_seqlen
+#endif
+            ) {
   int newi=0, nshuffle = 0;
   bool shuffled = false;
 
+#ifdef HAVE_CUDA
+  // Prepare C-array error matrix for GPU path
+  double *err_mat_c = NULL;
+  unsigned int err_ncol = 0;
+  if(gpu_ctx) {
+    err_ncol = errMat.ncol();
+    err_mat_c = (double *) malloc(sizeof(double) * errMat.ncol() * errMat.nrow());
+    if(err_mat_c == NULL) Rcpp::stop("Memory allocation failed.");
+    for(unsigned int row = 0; row < (unsigned int)errMat.nrow(); row++) {
+      for(unsigned int col = 0; col < (unsigned int)errMat.ncol(); col++) {
+        err_mat_c[row * err_ncol + col] = errMat(row, col);
+      }
+    }
+  }
+#endif
+
   B *bb;
   bb = b_new(raws, nraw, omegaA, omegaP, use_quals); // New cluster with all sequences in 1 bi
+
   // Everyone gets aligned within the initial cluster, no KMER screen
+#ifdef HAVE_CUDA
+  if(gpu_ctx) {
+    b_compare_gpu(bb, 0, err_mat_c, err_ncol, gpu_ctx, gpu_max_seqlen,
+                  match, mismatch, gap_pen, use_kmers, 1.0, band_size, gapless, greedy, verbose);
+  } else
+#endif
   if(multithread) { b_compare_parallel(bb, 0, errMat, match, mismatch, gap_pen, homo_gap_pen, use_kmers, 1.0, band_size, vectorized_alignment, SSE, gapless, greedy, verbose); }
   else { b_compare(bb, 0, errMat, match, mismatch, gap_pen, homo_gap_pen, use_kmers, 1.0, band_size, vectorized_alignment, SSE, gapless, greedy, verbose); }
-//  if(multithread) { b_p_update_parallel(bb); }
-  b_p_update(bb, greedy, detect_singletons); // Calculates abundance p-value for each raw in its cluster (consensuses)
-  
+
+  b_p_update(bb, greedy, detect_singletons);
+
   if(max_clust < 1) { max_clust = bb->nraw; }
-  
+
   while( (bb->nclust < max_clust) && (newi = b_bud(bb, min_fold, min_hamming, min_abund, verbose)) ) {
     if(verbose) Rprintf("\nNew Cluster C%i:", newi);
+
+#ifdef HAVE_CUDA
+    if(gpu_ctx) {
+      b_compare_gpu(bb, newi, err_mat_c, err_ncol, gpu_ctx, gpu_max_seqlen,
+                    match, mismatch, gap_pen, use_kmers, kdist_cutoff, band_size, gapless, greedy, verbose);
+    } else
+#endif
     if(multithread) { b_compare_parallel(bb, newi, errMat, match, mismatch, gap_pen, homo_gap_pen, use_kmers, kdist_cutoff, band_size, vectorized_alignment, SSE, gapless, greedy, verbose); }
     else { b_compare(bb, newi, errMat, match, mismatch, gap_pen, homo_gap_pen, use_kmers, kdist_cutoff, band_size, vectorized_alignment, SSE, gapless, greedy, verbose); }
+
     // Keep shuffling and updating until no more shuffles
     nshuffle = 0;
     do {
@@ -325,13 +415,16 @@ B *run_dada(Raw **raws, int nraw, Rcpp::NumericMatrix errMat,
     } while(shuffled && ++nshuffle < MAX_SHUFFLE);
     if(verbose && nshuffle >= MAX_SHUFFLE) { Rprintf("Warning: Reached maximum (%i) shuffles.\n", MAX_SHUFFLE); }
 
-//    if(multithread) { b_p_update_parallel(bb); }
     b_p_update(bb, greedy, detect_singletons);
     Rcpp::checkUserInterrupt();
-  } // while( (bb->nclust < max_clust) && (newi = b_bud(bb, min_fold, min_hamming, min_abund, verbose)) )
-  
+  }
+
   if(verbose) Rprintf("\nALIGN: %i aligns, %i shrouded (%i raw).\n", bb->nalign, bb->nshroud, bb->nraw);
-  
+
+#ifdef HAVE_CUDA
+  if(err_mat_c) free(err_mat_c);
+#endif
+
   return bb;
 }
 

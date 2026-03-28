@@ -158,17 +158,17 @@ double kord_dist_SSEi(uint16_t *kord1, int len1, uint16_t *kord2, int len2, int 
 void assign_kmer8(uint8_t *kvec8, const char *seq, int k) {  // Assumes a clean seq (just 1s,2s,3s,4s)
   int i, j, nti;
   size_t len = strlen(seq);
-  if(len <= 0 || len > SEQLEN) { Rcpp::stop("Unexpected sequence length."); }
-  if(k >= len || k < 3 || k > 8) { Rcpp::stop("Invalid kmer-size."); }
+  if(len <= 0 || len > SEQLEN) { Rcpp_stop("Unexpected sequence length."); }
+  if(k >= len || k < 3 || k > 8) { Rcpp_stop("Invalid kmer-size."); }
   size_t klen = len - k + 1; // The number of kmers in this sequence
   size_t kmer = 0;
   size_t n_kmers = (1 << (2*k));  // 4^k kmers
   uint16_t *kvec = (uint16_t *) malloc(n_kmers * sizeof(uint16_t)); //E
-  if (kvec == NULL)  Rcpp::stop("Memory allocation failed.");
+  if (kvec == NULL)  Rcpp_stop("Memory allocation failed.");
   for(kmer=0;kmer<n_kmers;kmer++) { kvec[kmer] = 0; }
   
   if(len <=0 || len > SEQLEN) {
-    Rcpp::stop("Unexpected sequence length.");
+    Rcpp_stop("Unexpected sequence length.");
   }
   
   for(i=0; i<klen; i++) {
@@ -176,7 +176,7 @@ void assign_kmer8(uint8_t *kvec8, const char *seq, int k) {  // Assumes a clean 
     for(j=i; j<i+k; j++) {
       nti = ((int) seq[j]) - 1; // Change 1s, 2s, 3s, 4s, to 0/1/2/3
       if(nti != 0 && nti != 1 && nti != 2 && nti != 3) {
-        Rcpp::stop("Unexpected nucleotide.");
+        Rcpp_stop("Unexpected nucleotide.");
         kmer = 999999;
         break;
       }
@@ -188,7 +188,7 @@ void assign_kmer8(uint8_t *kvec8, const char *seq, int k) {  // Assumes a clean 
     // to also reflect the reduction from the N's/-'s
     if(kmer == 999999) { ; } 
     else if(kmer >= n_kmers) {
-      Rcpp::stop("Kmer index out of range.");
+      Rcpp_stop("Kmer index out of range.");
     } else { // Valid kmer
       kvec[kmer]++;
     }
@@ -207,15 +207,15 @@ void assign_kmer8(uint8_t *kvec8, const char *seq, int k) {  // Assumes a clean 
 void assign_kmer(uint16_t *kvec, const char *seq, int k) {  // Assumes a clean seq (just 1s,2s,3s,4s)
   int i, j, nti;
   size_t len = strlen(seq);
-  if(len <= 0 || len > SEQLEN) { Rcpp::stop("Unexpected sequence length."); }
-  if(k >= len || k < 3 || k > 8) { Rcpp::stop("Invalid kmer-size."); }
+  if(len <= 0 || len > SEQLEN) { Rcpp_stop("Unexpected sequence length."); }
+  if(k >= len || k < 3 || k > 8) { Rcpp_stop("Invalid kmer-size."); }
   size_t klen = len - k + 1; // The number of kmers in this sequence
   size_t kmer = 0;
   size_t n_kmers = (1 << (2*k));  // 4^k kmers
   for(kmer=0;kmer<n_kmers;kmer++) { kvec[kmer] = 0; }
   
   if(len <=0 || len > SEQLEN) {
-    Rcpp::stop("Unexpected sequence length.");
+    Rcpp_stop("Unexpected sequence length.");
   }
   
   for(i=0; i<klen; i++) {
@@ -223,7 +223,7 @@ void assign_kmer(uint16_t *kvec, const char *seq, int k) {  // Assumes a clean s
     for(j=i; j<i+k; j++) {
       nti = ((int) seq[j]) - 1; // Change 1s, 2s, 3s, 4s, to 0/1/2/3
       if(nti != 0 && nti != 1 && nti != 2 && nti != 3) {
-        Rcpp::stop("Unexpected nucleotide.");
+        Rcpp_stop("Unexpected nucleotide.");
         kmer = 999999;
         break;
       }
@@ -235,7 +235,7 @@ void assign_kmer(uint16_t *kvec, const char *seq, int k) {  // Assumes a clean s
     // to also reflect the reduction from the N's/-'s
     if(kmer == 999999) { ; } 
     else if(kmer >= n_kmers) {
-      Rcpp::stop("Kmer index out of range.");
+      Rcpp_stop("Kmer index out of range.");
     } else { // Valid kmer
       kvec[kmer]++;
     }
@@ -246,12 +246,12 @@ void assign_kmer(uint16_t *kvec, const char *seq, int k) {  // Assumes a clean s
 void assign_kmer_order(uint16_t *kord, char *seq, int k) {  // Assumes a clean seq (just 1s,2s,3s,4s)
   int i, j, nti;
   size_t len = strlen(seq);
-  if(len <=0 || len > SEQLEN) { Rcpp::stop("Unexpected sequence length."); }
-  if(k >= len || k < 1 || k > 8) { Rcpp::stop("Invalid kmer-size."); }
+  if(len <=0 || len > SEQLEN) { Rcpp_stop("Unexpected sequence length."); }
+  if(k >= len || k < 1 || k > 8) { Rcpp_stop("Invalid kmer-size."); }
   size_t klen = len - k + 1; // The number of kmers in this sequence
   size_t kmer = 0;
   size_t n_kmers = (1 << (2*k));  // 4^k kmers
-  if (kord == NULL)  Rcpp::stop("Memory allocation failed.");
+  if (kord == NULL)  Rcpp_stop("Memory allocation failed.");
   for(i=0;i<klen;i++) { kord[i] = 0; }
   
   for(i=0; i<klen; i++) {
@@ -259,7 +259,7 @@ void assign_kmer_order(uint16_t *kord, char *seq, int k) {  // Assumes a clean s
     for(j=i; j<i+k; j++) {
       nti = ((int) seq[j]) - 1; // Change 1s, 2s, 3s, 4s, to 0/1/2/3
       if(nti != 0 && nti != 1 && nti != 2 && nti != 3) {
-        Rcpp::stop("Unexpected nucleotide.");
+        Rcpp_stop("Unexpected nucleotide.");
         kmer = 999999;
         break;
       }
@@ -271,7 +271,7 @@ void assign_kmer_order(uint16_t *kord, char *seq, int k) {  // Assumes a clean s
     // to also reflect the reduction from the N's/-'s
     if(kmer == 999999) { ; } 
     else if(kmer >= n_kmers) { // maybe check if above uin16_t max? Defined in header <stdint.h>, UINT16_MAX
-      Rcpp::stop("Kmer index out of range.");
+      Rcpp_stop("Kmer index out of range.");
     } else { // Valid kmer
       kord[i] = kmer;
     }

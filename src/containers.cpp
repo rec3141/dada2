@@ -1,5 +1,7 @@
+#ifndef NO_RCPP
 #include <Rcpp.h>
 #include <RcppParallel.h>
+#endif
 #include "dada.h"
 // [[Rcpp::interfaces(cpp)]]
 
@@ -19,9 +21,9 @@ inner two loops.
 Raw *raw_new(char *seq, double *qual, unsigned int reads, bool prior) {
   // Allocate
   Raw *raw = (Raw *) malloc(sizeof(Raw)); //E
-  if (raw == NULL)  Rcpp::stop("Memory allocation failed.");
+  if (raw == NULL)  Rcpp_stop("Memory allocation failed.");
   raw->seq = (char *) malloc(strlen(seq)+1); //E
-  if (raw->seq == NULL)  Rcpp::stop("Memory allocation failed.");
+  if (raw->seq == NULL)  Rcpp_stop("Memory allocation failed.");
   // Assign sequence and associated properties
   strcpy(raw->seq, seq);
   raw->length = strlen(seq);
@@ -30,7 +32,7 @@ Raw *raw_new(char *seq, double *qual, unsigned int reads, bool prior) {
   // Allocate and copy quals (quals downgraded to uint8_t here for memory savings)
   if(qual) { 
     raw->qual = (uint8_t *) malloc(raw->length * sizeof(uint8_t)); //E
-    if (raw->qual == NULL)  Rcpp::stop("Memory allocation failed.");
+    if (raw->qual == NULL)  Rcpp_stop("Memory allocation failed.");
     for(size_t i=0;i<raw->length;i++) { raw->qual[i] = (uint8_t) round(qual[i]); }
   } else {
     raw->qual = NULL;
@@ -52,9 +54,9 @@ void raw_free(Raw *raw) {
 // The constructor for the Bi object.
 Bi *bi_new(unsigned int totraw) {
   Bi *bi = new Bi;
-  if (bi == NULL)  Rcpp::stop("Memory allocation failed!\n");
+  if (bi == NULL)  Rcpp_stop("Memory allocation failed!\n");
   bi->raw = (Raw **) malloc(RAWBUF * sizeof(Raw *)); //E
-  if (bi->raw == NULL)  Rcpp::stop("Memory allocation failed.");
+  if (bi->raw == NULL)  Rcpp_stop("Memory allocation failed.");
   bi->maxraw = RAWBUF;
   bi->totraw = totraw;
   bi->center = NULL;
@@ -80,9 +82,9 @@ B *b_new(Raw **raws, unsigned int nraw, double omegaA, double omegaP, bool use_q
   
   // Allocate memory
   B *b = (B *) malloc(sizeof(B)); //E
-  if (b == NULL)  Rcpp::stop("Memory allocation failed.");
+  if (b == NULL)  Rcpp_stop("Memory allocation failed.");
   b->bi = (Bi **) malloc(CLUSTBUF * sizeof(Bi *)); //E
-  if (b->bi == NULL)  Rcpp::stop("Memory allocation failed.");
+  if (b->bi == NULL)  Rcpp_stop("Memory allocation failed.");
   b->maxclust = CLUSTBUF;
   
   // Initialize basic values
@@ -151,7 +153,7 @@ unsigned int bi_add_raw(Bi *bi, Raw *raw) {
   // Allocate more space if needed
   if(bi->nraw >= bi->maxraw) {    // Extend Raw* buffer
     bi->raw = (Raw **) realloc(bi->raw, (bi->maxraw+RAWBUF) * sizeof(Raw *)); //E
-    if (bi->raw == NULL)  Rcpp::stop("Memory allocation failed.");
+    if (bi->raw == NULL)  Rcpp_stop("Memory allocation failed.");
     bi->maxraw+=RAWBUF;
   }
   // Add raw and update reads/nraw
@@ -167,7 +169,7 @@ unsigned int b_add_bi(B *b, Bi *bi) {
   // Allocate more space if needed
   if(b->nclust >= b->maxclust) {    // Extend Bi* buffer
     b->bi = (Bi **) realloc(b->bi, (b->maxclust+CLUSTBUF) * sizeof(Bi *)); //E
-    if (b->bi == NULL)  Rcpp::stop("Memory allocation failed.");
+    if (b->bi == NULL)  Rcpp_stop("Memory allocation failed.");
     b->maxclust+=CLUSTBUF;
   }
   // Add bi and update nclust
@@ -190,7 +192,7 @@ Raw *bi_pop_raw(Bi *bi, unsigned int r) {
     bi->reads -= pop->reads;
     bi->update_e = true;
   } else {
-    Rcpp::stop("Container Error (Bi): Tried to pop out-of-range raw.");
+    Rcpp_stop("Container Error (Bi): Tried to pop out-of-range raw.");
     pop = NULL;
   }
   return pop;

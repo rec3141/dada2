@@ -83,7 +83,7 @@ char **nwalign_endsfree(const char *s1, size_t len1, const char *s2, size_t len2
   unsigned int ncol = len2+1;
   int *d = (int *) malloc(nrow * ncol * sizeof(int)); //E
   int *p = (int *) malloc(nrow * ncol * sizeof(int)); //E
-  if(d == NULL || p == NULL) Rcpp::stop("Memory allocation failed.");
+  if(d == NULL || p == NULL) Rcpp_stop("Memory allocation failed.");
   
   // Fill out left columns of d, p.
   for (i = 0; i <= len1; i++) {
@@ -159,7 +159,7 @@ char **nwalign_endsfree(const char *s1, size_t len1, const char *s2, size_t len2
     
   char *al0 = (char *) malloc((len1+len2+1) * sizeof(char));
   char *al1 = (char *) malloc((len1+len2+1) * sizeof(char));
-  if(al0 == NULL || al1 == NULL) Rcpp::stop("Memory allocation failed.");
+  if(al0 == NULL || al1 == NULL) Rcpp_stop("Memory allocation failed.");
 
   // Trace back over p to form the alignment.
   size_t len_al = 0;
@@ -182,7 +182,7 @@ char **nwalign_endsfree(const char *s1, size_t len1, const char *s2, size_t len2
       al1[len_al] = '-';
       break;
     default:
-      Rcpp::stop("N-W Align out of range.");
+      Rcpp_stop("N-W Align out of range.");
     }
     len_al++;
   }
@@ -192,10 +192,10 @@ char **nwalign_endsfree(const char *s1, size_t len1, const char *s2, size_t len2
   
   // Allocate memory to alignment strings.
   char **al = (char **) malloc( 2 * sizeof(char *) ); //E
-  if (al == NULL)  Rcpp::stop("Memory allocation failed.");
+  if (al == NULL)  Rcpp_stop("Memory allocation failed.");
   al[0] = (char *) malloc(len_al+1); //E
   al[1] = (char *) malloc(len_al+1); //E
-  if (al[0] == NULL || al[1] == NULL)  Rcpp::stop("Memory allocation failed.");
+  if (al[0] == NULL || al[1] == NULL)  Rcpp_stop("Memory allocation failed.");
 
   // Reverse the alignment strings (since traced backwards).
   for (i=0;i<len_al;i++) {
@@ -226,7 +226,7 @@ char **nwalign_endsfree_homo(const char *s1, size_t len1, const char *s2, size_t
   //find locations where s1 has homopolymer and put 1s in homo1
   unsigned char *homo1 = (unsigned char *) malloc(len1*sizeof(unsigned char)); //E
   unsigned char *homo2 = (unsigned char *) malloc(len2*sizeof(unsigned char)); //E
-  if(homo1 == NULL || homo2 == NULL) Rcpp::stop("Memory allocation failed.");
+  if(homo1 == NULL || homo2 == NULL) Rcpp_stop("Memory allocation failed.");
   for (i=0,j=0;j<len1;j++) {
     if (j==len1-1 || s1[j]!=s1[j+1]) {
       for(k=i;k<=j;k++) {
@@ -258,7 +258,7 @@ char **nwalign_endsfree_homo(const char *s1, size_t len1, const char *s2, size_t
   unsigned int ncol = len2+1;
   int *d = (int *) malloc(nrow * ncol * sizeof(int)); //E
   int *p = (int *) malloc(nrow * ncol * sizeof(int)); //E
-  if(d == NULL || p == NULL) Rcpp::stop("Memory allocation failed.");
+  if(d == NULL || p == NULL) Rcpp_stop("Memory allocation failed.");
   
   // Fill out left columns of d, p.
   for (i = 0; i <= len1; i++) {
@@ -338,7 +338,7 @@ char **nwalign_endsfree_homo(const char *s1, size_t len1, const char *s2, size_t
   
   char *al0 = (char *) malloc((len1+len2+1) * sizeof(char)); //E
   char *al1 = (char *) malloc((len1+len2+1) * sizeof(char)); //E
-  if(al0 == NULL || al1 == NULL) Rcpp::stop("Memory allocation failed.");
+  if(al0 == NULL || al1 == NULL) Rcpp_stop("Memory allocation failed.");
   
   // Trace back over p to form the alignment.
   size_t len_al = 0;
@@ -360,7 +360,7 @@ char **nwalign_endsfree_homo(const char *s1, size_t len1, const char *s2, size_t
       al1[len_al] = '-';
       break;
     default:
-      Rcpp::stop("N-W Align out of range.");
+      Rcpp_stop("N-W Align out of range.");
     }
     len_al++;
   }
@@ -370,10 +370,10 @@ char **nwalign_endsfree_homo(const char *s1, size_t len1, const char *s2, size_t
   
   // Allocate memory to alignment strings.
   char **al = (char **) malloc( 2 * sizeof(char *) ); //E
-  if (al == NULL)  Rcpp::stop("Memory allocation failed.");
+  if (al == NULL)  Rcpp_stop("Memory allocation failed.");
   al[0] = (char *) malloc(len_al+1); //E
   al[1] = (char *) malloc(len_al+1); //E
-  if (al[0] == NULL || al[1] == NULL)  Rcpp::stop("Memory allocation failed.");
+  if (al[0] == NULL || al[1] == NULL)  Rcpp_stop("Memory allocation failed.");
   
   // Reverse the alignment strings (since traced backwards).
   for (i=0;i<len_al;i++) {
@@ -410,7 +410,7 @@ char **nwalign(const char *s1, size_t len1, const char *s2, size_t len2, int sco
   unsigned int ncol = len2+1;
   int *d = (int *) malloc(nrow * ncol * sizeof(int)); //E
   int *p = (int *) malloc(nrow * ncol * sizeof(int)); //E
-  if(d == NULL || p == NULL) Rcpp::stop("Memory allocation failed.");
+  if(d == NULL || p == NULL) Rcpp_stop("Memory allocation failed.");
   
   d[0] = 0;
   p[0] = 0; // Should never be queried
@@ -481,7 +481,7 @@ char **nwalign(const char *s1, size_t len1, const char *s2, size_t len2, int sco
     
   char *al0 = (char *) malloc((len1+len2+1) * sizeof(char));
   char *al1 = (char *) malloc((len1+len2+1) * sizeof(char));
-  if(al0 == NULL || al1 == NULL) Rcpp::stop("Memory allocation failed.");
+  if(al0 == NULL || al1 == NULL) Rcpp_stop("Memory allocation failed.");
 
   // Trace back over p to form the alignment.
   size_t len_al = 0;
@@ -503,7 +503,7 @@ char **nwalign(const char *s1, size_t len1, const char *s2, size_t len2, int sco
       al1[len_al] = '-';
       break;
     default:
-      Rcpp::stop("N-W Align out of range.");
+      Rcpp_stop("N-W Align out of range.");
     }
     len_al++;
   }
@@ -513,10 +513,10 @@ char **nwalign(const char *s1, size_t len1, const char *s2, size_t len2, int sco
   
   // Allocate memory to alignment strings.
   char **al = (char **) malloc( 2 * sizeof(char *) ); //E
-  if (al == NULL)  Rcpp::stop("Memory allocation failed.");
+  if (al == NULL)  Rcpp_stop("Memory allocation failed.");
   al[0] = (char *) malloc(len_al+1); //E
   al[1] = (char *) malloc(len_al+1); //E
-  if (al[0] == NULL || al[1] == NULL)  Rcpp::stop("Memory allocation failed.");
+  if (al[0] == NULL || al[1] == NULL)  Rcpp_stop("Memory allocation failed.");
 
   // Reverse the alignment strings (since traced backwards).
   for (i=0;i<len_al;i++) {
@@ -540,10 +540,10 @@ char **nwalign_gapless(const char *s1, size_t len1, const char *s2, size_t len2)
   size_t len_al = len1 > len2 ? len1 : len2;
   // Allocate memory to alignment strings.
   char **al = (char **) malloc( 2 * sizeof(char *) ); //E
-  if (al == NULL)  Rcpp::stop("Memory allocation failed.");
+  if (al == NULL)  Rcpp_stop("Memory allocation failed.");
   al[0] = (char *) malloc(len_al+1); //E
   al[1] = (char *) malloc(len_al+1); //E
-  if (al[0] == NULL || al[1] == NULL)  Rcpp::stop("Memory allocation failed.");
+  if (al[0] == NULL || al[1] == NULL)  Rcpp_stop("Memory allocation failed.");
   // Copy strings into the alignment strings
   for (int i=0;i<len_al;i++) {
     al[0][i] = i < len1 ? s1[i] : '-';
@@ -579,7 +579,7 @@ Sub *al2subs(char **al) {
   
   // create Sub obect and initialize memory
   Sub *sub = (Sub *) malloc(sizeof(Sub)); //E
-  if (sub == NULL)  Rcpp::stop("Memory allocation failed.");
+  if (sub == NULL)  Rcpp_stop("Memory allocation failed.");
 
   // traverse alignment and find length of sq0 and nsubs for memory allocation
   len0 = 0; nsubs = 0;
@@ -603,7 +603,7 @@ Sub *al2subs(char **al) {
   sub->nt0 = (char *) malloc(nsubs); //E
   sub->nt1 = (char *) malloc(nsubs); //E
   if (sub->map == NULL || sub->pos == NULL || sub->nt0 == NULL || sub->nt1 == NULL) {
-    Rcpp::stop("Memory allocation failed.");
+    Rcpp_stop("Memory allocation failed.");
   }
   sub->nsubs=0;
     
@@ -653,7 +653,7 @@ Sub *sub_new(Raw *raw0, Raw *raw1, int match, int mismatch, int gap_p, int homo_
     if(raw0->qual && raw1->qual) {
       sub->q0 = (uint8_t *) malloc(sub->nsubs * sizeof(uint8_t)); //E
       sub->q1 = (uint8_t *) malloc(sub->nsubs * sizeof(uint8_t)); //E
-      if (sub->q0 == NULL || sub->q1 == NULL) { Rcpp::stop("Memory allocation failed."); }
+      if (sub->q0 == NULL || sub->q1 == NULL) { Rcpp_stop("Memory allocation failed."); }
       
       for(s=0;s<sub->nsubs;s++) {
         sub->q0[s] = raw0->qual[sub->pos[s]]; // allocated uint8_t
@@ -680,13 +680,13 @@ Sub *sub_copy(Sub *sub) {
   len0 = sub->len0;
   
   Sub *rsub = (Sub *) malloc(sizeof(Sub)); //E
-  if (rsub == NULL)  Rcpp::stop("Memory allocation failed.");
+  if (rsub == NULL)  Rcpp_stop("Memory allocation failed.");
   rsub->map = (uint16_t *) malloc(len0 * sizeof(uint16_t)); //E
   rsub->pos = (uint16_t *) malloc(nsubs * sizeof(uint16_t)); //E
   rsub->nt0 = (char *) malloc(nsubs); //E
   rsub->nt1 = (char *) malloc(nsubs); //E
   if (rsub->map == NULL || rsub->pos == NULL || rsub->nt0 == NULL || rsub->nt1 == NULL) {
-    Rcpp::stop("Memory allocation failed.");
+    Rcpp_stop("Memory allocation failed.");
   }
   
   rsub->nsubs = sub->nsubs;
@@ -699,7 +699,7 @@ Sub *sub_copy(Sub *sub) {
   if(sub->q0 && sub->q1) {
     rsub->q0 = (uint8_t *) malloc(nsubs * sizeof(uint8_t)); //E
     rsub->q1 = (uint8_t *) malloc(nsubs * sizeof(uint8_t)); //E
-    if (rsub->q0 == NULL || rsub->q1 == NULL) { Rcpp::stop("Memory allocation failed."); }
+    if (rsub->q0 == NULL || rsub->q1 == NULL) { Rcpp_stop("Memory allocation failed."); }
     memcpy(rsub->q0, sub->q0, nsubs * sizeof(uint8_t)); // allocated double
     memcpy(rsub->q1, sub->q1, nsubs * sizeof(uint8_t)); // allocated double
   } else {

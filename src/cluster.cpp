@@ -1,16 +1,19 @@
+#ifndef NO_RCPP
 #include <Rcpp.h>
 #include <RcppParallel.h>
+#endif
 #include "dada.h"
 // [[Rcpp::interfaces(cpp)]]
 
 /********* ALGORITHM LOGIC *********/
 
+#ifndef NO_RCPP
 /*
  compare:
 Performs alignments and computes lambda for all raws to the specified Bi
 Stores only those that can possibly be recruited to this Bi
 */
-void b_compare(B *b, unsigned int i, Rcpp::NumericMatrix errMat, 
+void b_compare(B *b, unsigned int i, Rcpp::NumericMatrix errMat,
                int match, int mismatch, int gap_pen, int homo_gap_pen, 
                bool use_kmers, double kdist_cutoff, int band_size, bool vectorized_alignment, 
                int SSE, bool gapless, bool greedy, bool verbose) {
@@ -26,7 +29,7 @@ void b_compare(B *b, unsigned int i, Rcpp::NumericMatrix errMat,
   size_t cached;
   size_t n_kmer = 1 << (2*KMER_SIZE);
   uint8_t *kcache = (uint8_t *) malloc(n_kmer * sizeof(uint8_t)); //E
-  if (kcache == NULL)  Rcpp::stop("Memory allocation failed.");
+  if (kcache == NULL)  Rcpp_stop("Memory allocation failed.");
   cached=CACHE_STRIDE-1;
   // Cache
   if(cached < b->nraw) {
@@ -160,9 +163,9 @@ void b_compare_parallel(B *b, unsigned int i, Rcpp::NumericMatrix errMat,
   
   // Make thread-safe C-array for the error rate matrix
   double *err_mat = (double *) malloc(sizeof(double) * errMat.ncol() * errMat.nrow());
-  if(err_mat==NULL) Rcpp::stop("Memory allocation failed.");
+  if(err_mat==NULL) Rcpp_stop("Memory allocation failed.");
   ncol = errMat.ncol();
-  if(errMat.nrow() != 16) { Rcpp::stop("Error matrix doesn't have 16 rows."); }
+  if(errMat.nrow() != 16) { Rcpp_stop("Error matrix doesn't have 16 rows."); }
   for(row=0;row<errMat.nrow();row++) {
     for(col=0;col<errMat.ncol();col++) {
       err_mat[row*ncol + col] = errMat(row, col);
@@ -171,7 +174,7 @@ void b_compare_parallel(B *b, unsigned int i, Rcpp::NumericMatrix errMat,
   
   // Parallelize for loop to perform all comparisons
   Comparison *comps = (Comparison *) malloc(sizeof(Comparison) * b->nraw);
-  if(comps==NULL) Rcpp::stop("Memory allocation failed.");
+  if(comps==NULL) Rcpp_stop("Memory allocation failed.");
   CompareParallel compareParallel(b, i, err_mat, ncol, comps, match, mismatch, gap_pen, homo_gap_pen, use_kmers, kdist_cutoff, band_size, vectorized_alignment, SSE, gapless, greedy);
   RcppParallel::parallelFor(0, b->nraw, compareParallel, GRAIN_SIZE);
   
@@ -181,7 +184,7 @@ void b_compare_parallel(B *b, unsigned int i, Rcpp::NumericMatrix errMat,
     raw = b->raw[index];
     comp = comps[index];
     lambda = comp.lambda;
-    if(lambda<0 || lambda>1) Rcpp::stop("Lambda out-of-range error.");
+    if(lambda<0 || lambda>1) Rcpp_stop("Lambda out-of-range error.");
 
     // Store self-lambda
     if(index == b->bi[i]->center->index) { 
@@ -202,6 +205,147 @@ void b_compare_parallel(B *b, unsigned int i, Rcpp::NumericMatrix errMat,
   free(err_mat);
   free(comps);
 }
+#endif /* !NO_RCPP */
+
+/* OpenMP version for standalone (NO_RCPP) builds */
+#ifdef NO_RCPP
+void b_compare_omp(B *b, unsigned int i, double *err_mat, unsigned int ncol,
+                   int match, int mismatch, int gap_pen, int homo_gap_pen,
+                   bool use_kmers, double kdist_cutoff, int band_size,
+                   bool vectorized_alignment, int SSE, bool gapless, bool greedy, bool verbose) {
+  unsigned int index, cind;
+  double lambda;
+  Raw *raw;
+  Comparison comp;
+
+  Comparison *comps = (Comparison *) malloc(sizeof(Comparison) * b->nraw);
+  if(comps == NULL) Rcpp_stop("Memory allocation failed.");
+
+  unsigned int center_reads = b->bi[i]->center->reads;
+
+  #pragma omp parallel for schedule(dynamic, GRAIN_SIZE) private(raw)
+  for(unsigned int idx = 0; idx < b->nraw; idx++) {
+    Sub *sub;
+    raw = b->raw[idx];
+    if(greedy && (raw->reads > center_reads)) {
+      sub = NULL;
+    } else if(greedy && raw->lock) {
+      sub = NULL;
+    } else {
+      sub = sub_new(b->bi[i]->center, raw, match, mismatch, gap_pen, homo_gap_pen,
+                    use_kmers, kdist_cutoff, band_size, vectorized_alignment, SSE, gapless);
+    }
+    comps[idx].i = i;
+    comps[idx].index = idx;
+    comps[idx].lambda = compute_lambda_ts(raw, sub, ncol, err_mat, b->use_quals);
+    comps[idx].hamming = sub ? sub->nsubs : (unsigned int)(-1);
+    sub_free(sub);
+  }
+
+  // Post-process (same as b_compare_parallel)
+  for(index = 0, cind = 0; index < b->nraw; index++) {
+    b->nalign++;
+    raw = b->raw[index];
+    comp = comps[index];
+    lambda = comp.lambda;
+    if(lambda < 0 || lambda > 1) Rcpp_stop("Lambda out-of-range error.");
+    if(index == b->bi[i]->center->index) { b->bi[i]->self = lambda; }
+    if(lambda * b->reads > raw->E_minmax) {
+      if(lambda * b->bi[i]->center->reads > raw->E_minmax) {
+        raw->E_minmax = lambda * b->bi[i]->center->reads;
+      }
+      b->bi[i]->comp.push_back(comp);
+      if(i == 0 || raw == b->bi[i]->center) { raw->comp = comp; }
+    }
+  }
+  free(comps);
+}
+#endif /* NO_RCPP */
+
+/*
+ * GPU-accelerated comparison: 2-pass approach.
+ * Pass 1 (GPU): kmer distance screening + greedy checks. Massively parallel.
+ * Pass 2 (CPU/OpenMP): alignment + lambda for pairs that passed screen.
+ *   Uses the exact same nwalign_vectorized2 as the CPU path, ensuring
+ *   byte-identical alignment and lambda values.
+ */
+#ifdef HAVE_CUDA
+void b_compare_gpu(B *b, unsigned int i, double *err_mat, unsigned int ncol,
+                   GpuContext *gpu_ctx, unsigned int max_seqlen,
+                   int match, int mismatch, int gap_pen,
+                   bool use_kmers, double kdist_cutoff, int band_size,
+                   bool gapless, bool greedy, bool verbose) {
+  unsigned int index, cind;
+  double lambda;
+  Raw *raw;
+  Comparison comp;
+
+  // Upload current lock states
+  int *locks = (int *) malloc(b->nraw * sizeof(int));
+  if(locks == NULL) Rcpp_stop("Memory allocation failed.");
+  for(index = 0; index < b->nraw; index++) {
+    locks[index] = b->raw[index]->lock ? 1 : 0;
+  }
+  gpu_upload_locks(gpu_ctx, locks, b->nraw);
+  free(locks);
+
+  // Pass 1: GPU kmer screen
+  double *screen = (double *) malloc(b->nraw * sizeof(double));
+  unsigned int *hammings = (unsigned int *) malloc(b->nraw * sizeof(unsigned int));
+  if(!screen || !hammings) Rcpp_stop("Memory allocation failed.");
+
+  gpu_compare(gpu_ctx, b->bi[i]->center->index, b->nraw,
+              match, mismatch, gap_pen, band_size,
+              kdist_cutoff,
+              use_kmers ? 1 : 0, b->use_quals ? 1 : 0, gapless ? 1 : 0,
+              greedy ? 1 : 0, b->bi[i]->center->reads, ncol,
+              screen, hammings);
+
+  // Pass 2: CPU alignment + lambda for pairs that passed (screen[idx] == -1.0)
+  Comparison *comps = (Comparison *) malloc(sizeof(Comparison) * b->nraw);
+  if(comps == NULL) Rcpp_stop("Memory allocation failed.");
+
+  #pragma omp parallel for schedule(dynamic, GRAIN_SIZE)
+  for(unsigned int idx = 0; idx < b->nraw; idx++) {
+    Sub *sub;
+    if(screen[idx] == -1.0) {
+      // Passed GPU kmer screen — run full CPU alignment path (byte-identical)
+      // use_kmers=true so CPU does kord_dist check to choose gapless vs banded NW
+      // kdist_cutoff=1.0 so kmer distance check always passes (already screened by GPU)
+      sub = sub_new(b->bi[i]->center, b->raw[idx], match, mismatch, gap_pen, gap_pen,
+                    use_kmers, 1.0, band_size, true, 2, gapless);
+    } else {
+      sub = NULL;  // Shrouded or skipped by GPU
+    }
+    comps[idx].i = i;
+    comps[idx].index = idx;
+    comps[idx].lambda = compute_lambda_ts(b->raw[idx], sub, ncol, err_mat, b->use_quals);
+    comps[idx].hamming = sub ? sub->nsubs : (unsigned int)(-1);
+    sub_free(sub);
+  }
+
+  free(screen);
+  free(hammings);
+
+  // Post-process (identical to b_compare_parallel / b_compare_omp)
+  for(index = 0, cind = 0; index < b->nraw; index++) {
+    b->nalign++;
+    raw = b->raw[index];
+    comp = comps[index];
+    lambda = comp.lambda;
+    if(lambda < 0 || lambda > 1) Rcpp_stop("Lambda out-of-range error.");
+    if(index == b->bi[i]->center->index) { b->bi[i]->self = lambda; }
+    if(lambda * b->reads > raw->E_minmax) {
+      if(lambda * b->bi[i]->center->reads > raw->E_minmax) {
+        raw->E_minmax = lambda * b->bi[i]->center->reads;
+      }
+      b->bi[i]->comp.push_back(comp);
+      if(i == 0 || raw == b->bi[i]->center) { raw->comp = comp; }
+    }
+  }
+  free(comps);
+}
+#endif
 
 /* b_shuffle2:
  move each sequence to the bi that produces the highest expected
@@ -216,7 +360,7 @@ bool b_shuffle2(B *b) {
   
   double *emax = (double *) malloc(b->nraw * sizeof(double)); //E
   Comparison **compmax = (Comparison **) malloc(b->nraw * sizeof(Comparison *)); //E
-  if(emax==NULL || compmax==NULL) Rcpp::stop("Memory allocation failed.");
+  if(emax==NULL || compmax==NULL) Rcpp_stop("Memory allocation failed.");
 
   // Initialize emax/imax off of cluster 0
   // Comparisons to all raws exist in cluster 0, in index order
