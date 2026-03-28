@@ -60,6 +60,42 @@ DadaResult* dada2_run(
 void dada2_result_free(DadaResult *res);
 int dada2_gpu_available(void);
 
+/* Taxonomy assignment result */
+typedef struct {
+    int      nseq;      /* number of query sequences */
+    int      nlevel;    /* number of taxonomy levels */
+    int     *rval;      /* best genus index per query (nseq), 1-indexed, 0=NA */
+    int     *rboot;     /* bootstrap counts (nseq x nlevel), row-major */
+} TaxResult;
+
+/* Assign taxonomy using naive Bayesian kmer classifier.
+ *
+ * seqs:         query sequences (nseq)
+ * nseq:         number of query sequences
+ * refs:         reference sequences (nref)
+ * nref:         number of references
+ * ref_to_genus: 0-indexed genus ID per reference (nref)
+ * genusmat:     genus-to-level assignment matrix (ngenus x nlevel), row-major
+ * ngenus:       number of unique genera
+ * nlevel:       number of taxonomy levels
+ * verbose:      print progress
+ *
+ * Returns a TaxResult* that must be freed with dada2_tax_result_free().
+ */
+TaxResult* dada2_assign_taxonomy(
+    const char **seqs,
+    int nseq,
+    const char **refs,
+    int nref,
+    const int *ref_to_genus,
+    const int *genusmat,
+    int ngenus,
+    int nlevel,
+    int verbose
+);
+
+void dada2_tax_result_free(TaxResult *res);
+
 #ifdef __cplusplus
 }
 #endif

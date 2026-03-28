@@ -159,7 +159,13 @@ void assign_kmer8(uint8_t *kvec8, const char *seq, int k) {  // Assumes a clean 
   int i, j, nti;
   size_t len = strlen(seq);
   if(len <= 0 || len > SEQLEN) { Rcpp_stop("Unexpected sequence length."); }
-  if(k >= len || k < 3 || k > 8) { Rcpp_stop("Invalid kmer-size."); }
+  if(k < 3 || k > 8) { Rcpp_stop("Invalid kmer-size."); }
+  // Sequence too short for this kmer size — zero out and return
+  if(k >= (int)len) {
+    size_t n_kmers = (1 << (2*k));
+    for(size_t m=0; m<n_kmers; m++) { kvec8[m] = 0; }
+    return;
+  }
   size_t klen = len - k + 1; // The number of kmers in this sequence
   size_t kmer = 0;
   size_t n_kmers = (1 << (2*k));  // 4^k kmers
@@ -208,7 +214,13 @@ void assign_kmer(uint16_t *kvec, const char *seq, int k) {  // Assumes a clean s
   int i, j, nti;
   size_t len = strlen(seq);
   if(len <= 0 || len > SEQLEN) { Rcpp_stop("Unexpected sequence length."); }
-  if(k >= len || k < 3 || k > 8) { Rcpp_stop("Invalid kmer-size."); }
+  if(k < 3 || k > 8) { Rcpp_stop("Invalid kmer-size."); }
+  // Sequence too short for this kmer size — zero out and return
+  if(k >= (int)len) {
+    size_t n_kmers = (1 << (2*k));
+    for(size_t m=0; m<n_kmers; m++) { kvec[m] = 0; }
+    return;
+  }
   size_t klen = len - k + 1; // The number of kmers in this sequence
   size_t kmer = 0;
   size_t n_kmers = (1 << (2*k));  // 4^k kmers
@@ -247,7 +259,12 @@ void assign_kmer_order(uint16_t *kord, char *seq, int k) {  // Assumes a clean s
   int i, j, nti;
   size_t len = strlen(seq);
   if(len <=0 || len > SEQLEN) { Rcpp_stop("Unexpected sequence length."); }
-  if(k >= len || k < 1 || k > 8) { Rcpp_stop("Invalid kmer-size."); }
+  if(k < 1 || k > 8) { Rcpp_stop("Invalid kmer-size."); }
+  // Sequence too short for this kmer size — zero out and return
+  if(k >= (int)len) {
+    for(size_t m=0; m<len; m++) { kord[m] = 0; }
+    return;
+  }
   size_t klen = len - k + 1; // The number of kmers in this sequence
   size_t kmer = 0;
   size_t n_kmers = (1 << (2*k));  // 4^k kmers

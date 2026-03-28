@@ -3,7 +3,6 @@
 import sys
 import os
 import numpy as np
-from concurrent.futures import ThreadPoolExecutor
 from . import _cdada
 from .io import derep_fastq
 from .error import loess_errfun, get_initial_err
@@ -31,6 +30,54 @@ DADA_OPTS = {
     "GAPLESS": True,
     "GREEDY": True,
 }
+
+
+def _run_one_sample(args):
+    """Worker function for parallel dada() calls.
+
+    Must be a top-level function for multiprocessing pickling.
+    Re-imports _cdada in each subprocess (ctypes can't be pickled).
+    """
+    drp, err, opts, max_clust = args
+    from dada2gpu import _cdada as _cd
+
+    seqs = drp["seqs"]
+    abundances = drp["abundances"]
+    quals = drp["quals"]
+    nraw = len(seqs)
+
+    if nraw == 0:
+        return {"cluster_seqs": [], "cluster_abunds": np.array([]),
+                "trans": np.zeros((16, err.shape[1]), dtype=np.int32),
+                "map": np.array([]), "pval": np.array([])}
+
+    # Extend error matrix if needed
+    max_q_obs = int(np.nanmax(quals)) + 1 if not np.all(np.isnan(quals)) else 0
+    erri = err.copy()
+    if max_q_obs > erri.shape[1]:
+        extra = np.tile(erri[:, -1:], (1, max_q_obs - erri.shape[1]))
+        erri = np.hstack([erri, extra])
+
+    homo_gap = opts["GAP_PENALTY"] if opts["HOMOPOLYMER_GAP_PENALTY"] is None else opts["HOMOPOLYMER_GAP_PENALTY"]
+
+    res = _cd.run_dada(
+        seqs, abundances, erri, quals,
+        match=opts["MATCH"], mismatch=opts["MISMATCH"], gap_pen=opts["GAP_PENALTY"],
+        use_kmers=opts["USE_KMERS"], kdist_cutoff=opts["KDIST_CUTOFF"],
+        band_size=opts["BAND_SIZE"],
+        omega_a=opts["OMEGA_A"], omega_p=opts["OMEGA_P"], omega_c=opts["OMEGA_C"],
+        detect_singletons=opts["DETECT_SINGLETONS"], max_clust=max_clust,
+        min_fold=opts["MIN_FOLD"], min_hamming=opts["MIN_HAMMING"],
+        min_abund=opts["MIN_ABUNDANCE"],
+        use_quals=opts["USE_QUALS"], vectorized_alignment=opts["VECTORIZED_ALIGNMENT"],
+        homo_gap_pen=homo_gap,
+        multithread=False, verbose=False,
+        sse=opts["SSE"], gapless=opts["GAPLESS"], greedy=opts["GREEDY"],
+    )
+
+    res["denoised"] = {seq: ab for seq, ab in
+                       zip(res["cluster_seqs"], res["cluster_abunds"])}
+    return res
 
 
 def set_dada_opt(**kwargs):
@@ -97,6 +144,24 @@ def dada(derep, err=None, error_estimation_function=None, self_consist=False,
     err_history = []
     nconsist = 0 if initialize_err else 1  # R starts at 0 for init, 1 otherwise
 
+    # Determine parallelism strategy:
+    # - GPU available: run sequentially (GPU is already fast, shared resource)
+    # - CPU only: use ProcessPoolExecutor (ctypes holds GIL, threads don't help)
+    use_gpu = _cdada.gpu_available()
+    n_workers = int(os.environ.get("DADA2_WORKERS", "0"))
+    if n_workers == 0:
+        n_workers = min(len(derep), os.cpu_count() or 1)
+    use_parallel = not use_gpu and len(derep) > 1 and n_workers > 1
+
+    # Create a persistent process pool (reused across self-consistency iterations)
+    pool = None
+    if use_parallel:
+        from concurrent.futures import ProcessPoolExecutor
+        os.environ["OMP_NUM_THREADS"] = "1"
+        pool = ProcessPoolExecutor(max_workers=n_workers)
+    elif use_gpu:
+        os.environ["OMP_NUM_THREADS"] = "1"
+
     while True:
         nconsist += 1
         if verbose and self_consist:
@@ -106,57 +171,33 @@ def dada(derep, err=None, error_estimation_function=None, self_consist=False,
         # R uses MAX_CLUST=1 on the initialization pass (nconsist==1 after init)
         max_clust_iter = 1 if initialize_err else o["MAX_CLUST"]
 
-        # Extend error matrix once for all samples
+        # Extend error matrix once for all samples (upstream optimization)
         max_q_all = max((int(np.nanmax(d["quals"])) + 1 if d["quals"].size and not np.all(np.isnan(d["quals"])) else 0) for d in derep)
         erri = err.copy()
         if max_q_all > erri.shape[1]:
             extra = np.tile(erri[:, -1:], (1, max_q_all - erri.shape[1]))
             erri = np.hstack([erri, extra])
 
-        def _process_sample(drp):
-            seqs = drp["seqs"]
-            if len(seqs) == 0:
-                return {"cluster_seqs": [], "cluster_abunds": np.array([]),
-                        "trans": np.zeros((16, erri.shape[1]), dtype=np.int32),
-                        "map": np.array([]), "pval": np.array([])}
-            return _cdada.run_dada(
-                seqs, drp["abundances"], erri, drp["quals"],
-                match=o["MATCH"], mismatch=o["MISMATCH"], gap_pen=o["GAP_PENALTY"],
-                use_kmers=o["USE_KMERS"], kdist_cutoff=o["KDIST_CUTOFF"],
-                band_size=o["BAND_SIZE"],
-                omega_a=o["OMEGA_A"], omega_p=o["OMEGA_P"], omega_c=o["OMEGA_C"],
-                detect_singletons=o["DETECT_SINGLETONS"], max_clust=max_clust_iter,
-                min_fold=o["MIN_FOLD"], min_hamming=o["MIN_HAMMING"],
-                min_abund=o["MIN_ABUNDANCE"],
-                use_quals=o["USE_QUALS"], vectorized_alignment=o["VECTORIZED_ALIGNMENT"],
-                homo_gap_pen=homo_gap,
-                multithread=False, verbose=False,
-                sse=o["SSE"], gapless=o["GAPLESS"], greedy=o["GREEDY"],
-            )
+        if use_parallel and pool is not None:
+            # Parallel: dispatch each sample to a persistent worker pool
+            work_args = [(drp, erri, o, max_clust_iter) for drp in derep]
+            results = list(pool.map(_run_one_sample, work_args))
 
-        # Parallel strategy: if GPU available, run sequentially (GPU fast enough).
-        # If CPU-only, run samples in parallel threads (GIL released in ctypes).
-        use_gpu = _cdada.gpu_available()
-        if use_gpu:
-            os.environ['OMP_NUM_THREADS'] = '1'
-            results = [_process_sample(d) for d in derep]
+            if verbose and self_consist:
+                sys.stdout.write("." * len(derep))
+                sys.stdout.flush()
         else:
-            n_workers = min(len(derep), os.cpu_count() or 4)
-            os.environ['OMP_NUM_THREADS'] = '1'
-            if n_workers > 1 and len(derep) > 1:
-                with ThreadPoolExecutor(max_workers=n_workers) as pool:
-                    results = list(pool.map(_process_sample, derep))
-            else:
-                results = [_process_sample(d) for d in derep]
+            # Sequential: single sample, GPU mode, or single worker
+            results = []
+            for i, drp in enumerate(derep):
+                if verbose and self_consist:
+                    sys.stdout.write(".")
+                    sys.stdout.flush()
 
-        if verbose and self_consist:
-            sys.stdout.write("." * len(derep))
+                res = _run_one_sample((drp, erri, o, max_clust_iter))
+                results.append(res)
 
-        trans_list = []
-        for res in results:
-            res["denoised"] = {seq: ab for seq, ab in
-                               zip(res["cluster_seqs"], res["cluster_abunds"])}
-            trans_list.append(res["trans"])
+        trans_list = [r["trans"] for r in results]
 
         if verbose and self_consist:
             print()
@@ -192,6 +233,10 @@ def dada(derep, err=None, error_estimation_function=None, self_consist=False,
             err[10, :] = 1.0  # G2G
             err[15, :] = 1.0  # T2T
             initialize_err = False
+
+    # Shut down persistent pool
+    if pool is not None:
+        pool.shutdown(wait=False)
 
     # Attach error info to results
     for res in results:
