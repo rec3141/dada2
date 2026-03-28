@@ -18,6 +18,7 @@ try:
             ("seqs", ct.POINTER(ct.c_char_p)),
             ("abundances", ct.POINTER(ct.c_int)),
             ("quals", ct.POINTER(ct.c_double)),
+            ("map", ct.POINTER(ct.c_int)),
         ]
 
     _lib.derep_fastq_c.restype = ct.POINTER(_DerepResult)
@@ -42,17 +43,19 @@ def _derep_fastq_c(filepath):
     seqs = [res.seqs[i].decode('ascii') for i in range(nu)]
     abunds = np.ctypeslib.as_array(res.abundances, shape=(nu,)).copy()
     quals = np.ctypeslib.as_array(res.quals, shape=(nu * ml,)).copy().reshape(nu, ml)
+    nr = res.n_reads
+    rmap = np.ctypeslib.as_array(res.map, shape=(nr,)).copy()
 
     _lib.derep_result_free(res_ptr)
-    return {"seqs": seqs, "abundances": abunds, "quals": quals, "map": np.array([], dtype=np.int32)}
+    return {"seqs": seqs, "abundances": abunds, "quals": quals, "map": rmap}
 
 
 def derep_fastq(filepath, verbose=False, with_map=False):
     """Dereplicate a FASTQ file.
 
-    Uses C implementation (zlib) when available for ~10x speedup.
-    Use with_map=True to get the read-to-unique mapping (needed for mergePairs).
-    The C implementation doesn't compute the map, so with_map=True forces Python.
+    Uses C implementation (zlib) when available for ~2x speedup.
+    Always returns the per-read map (read_idx -> unique_idx).
+    The with_map parameter is accepted for backward compatibility but ignored.
 
     Returns:
         dict with keys:
@@ -61,8 +64,8 @@ def derep_fastq(filepath, verbose=False, with_map=False):
             quals: numpy float64 array (n_uniques x max_seqlen), average quality
             map: numpy int32 array, maps each read to its unique index (0-indexed)
     """
-    # Use C implementation if available (~10x faster) — but not if map is needed
-    if _HAS_C_DEREP and not with_map:
+    # Use C implementation if available
+    if _HAS_C_DEREP:
         result = _derep_fastq_c(filepath)
         if verbose:
             print(f"Read {result['abundances'].sum()} reads, {len(result['seqs'])} unique sequences")

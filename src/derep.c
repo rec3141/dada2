@@ -1,6 +1,7 @@
 /*
  * derep.c - Fast FASTQ dereplication in C.
  * Reads gzipped FASTQ, deduplicates sequences, averages quality scores.
+ * Returns per-read map (read_idx -> unique_idx) for paired-end merging.
  * Called from Python via ctypes.
  */
 
@@ -12,12 +13,14 @@
 /* Simple hash map for sequence deduplication */
 #define HASH_SIZE (1 << 20)  /* 1M buckets */
 #define MAX_SEQ_LEN 1024
+#define MAP_INIT_CAP 65536
 
 typedef struct Entry {
     char *seq;
     int count;
     double *qual_sum;
     int seq_len;
+    int insert_id;      /* first-seen order (before abundance sort) */
     struct Entry *next;
 } Entry;
 
@@ -29,9 +32,7 @@ typedef struct {
     char **seqs;        /* n_uniques null-terminated strings */
     int *abundances;    /* n_uniques */
     double *quals;      /* n_uniques * max_seq_len, row-major, NaN-padded */
-    /* Note: per-read map (read_idx -> unique_idx) is not returned.
-     * dada() and learnErrors() don't need it. If needed in future,
-     * add int *map (n_reads entries) and populate during parsing. */
+    int *map;           /* n_reads: read_idx -> sorted unique_idx (0-indexed) */
 } DerepResult;
 
 static int cmp_entry_desc(const void *a, const void *b) {
@@ -57,6 +58,10 @@ DerepResult* derep_fastq_c(const char *filepath) {
 
     char line[MAX_SEQ_LEN * 2];
     int n_reads = 0, n_uniques = 0, max_len = 0;
+
+    /* Growable array for per-read map (read_idx -> insert_id) */
+    int map_cap = MAP_INIT_CAP;
+    int *raw_map = (int *)malloc(map_cap * sizeof(int));
 
     /* Parse FASTQ: 4 lines per record */
     while (gzgets(gz, line, sizeof(line))) {
@@ -104,6 +109,7 @@ DerepResult* derep_fastq_c(const char *filepath) {
             e->seq_len = slen;
             e->count = 0;
             e->qual_sum = (double *)calloc(slen, sizeof(double));
+            e->insert_id = n_uniques;
             e->next = table[h];
             table[h] = e;
             n_uniques++;
@@ -113,6 +119,13 @@ DerepResult* derep_fastq_c(const char *filepath) {
         int mlen = slen < qlen ? slen : qlen;
         for (int i = 0; i < mlen; i++)
             e->qual_sum[i] += (double)((unsigned char)qline[i] - 33);
+
+        /* Record map: this read -> insert_id (will remap to sorted index later) */
+        if (n_reads >= map_cap) {
+            map_cap *= 2;
+            raw_map = (int *)realloc(raw_map, map_cap * sizeof(int));
+        }
+        raw_map[n_reads] = e->insert_id;
 
         n_reads++;
     }
@@ -132,6 +145,18 @@ DerepResult* derep_fastq_c(const char *filepath) {
     /* Sort by abundance descending */
     qsort(all, n_uniques, sizeof(Entry *), cmp_entry_desc);
 
+    /* Build insert_id -> sorted_index remap table */
+    int *remap = (int *)malloc(n_uniques * sizeof(int));
+    for (int i = 0; i < n_uniques; i++)
+        remap[all[i]->insert_id] = i;
+
+    /* Remap raw_map from insert_id to sorted index */
+    int *sorted_map = (int *)malloc(n_reads * sizeof(int));
+    for (int i = 0; i < n_reads; i++)
+        sorted_map[i] = remap[raw_map[i]];
+    free(raw_map);
+    free(remap);
+
     /* Build result */
     DerepResult *res = (DerepResult *)calloc(1, sizeof(DerepResult));
     res->n_uniques = n_uniques;
@@ -140,8 +165,9 @@ DerepResult* derep_fastq_c(const char *filepath) {
     res->seqs = (char **)malloc(n_uniques * sizeof(char *));
     res->abundances = (int *)malloc(n_uniques * sizeof(int));
     res->quals = (double *)malloc((size_t)n_uniques * max_len * sizeof(double));
+    res->map = sorted_map;
 
-    /* Fill with NaN */
+    /* Fill quals with NaN */
     for (size_t i = 0; i < (size_t)n_uniques * max_len; i++)
         res->quals[i] = 0.0 / 0.0;  /* NaN */
 
@@ -166,5 +192,6 @@ void derep_result_free(DerepResult *res) {
     free(res->seqs);
     free(res->abundances);
     free(res->quals);
+    free(res->map);
     free(res);
 }
