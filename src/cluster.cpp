@@ -289,42 +289,49 @@ void b_compare_gpu(B *b, unsigned int i, double *err_mat, unsigned int ncol,
   gpu_upload_locks(gpu_ctx, locks, b->nraw);
   free(locks);
 
-  // Pass 1: GPU kmer screen
-  double *screen = (double *) malloc(b->nraw * sizeof(double));
+  // GPU comparison
+  double *lambdas = (double *) malloc(b->nraw * sizeof(double));
   unsigned int *hammings = (unsigned int *) malloc(b->nraw * sizeof(unsigned int));
-  if(!screen || !hammings) Rcpp_stop("Memory allocation failed.");
+  if(!lambdas || !hammings) Rcpp_stop("Memory allocation failed.");
 
   gpu_compare(gpu_ctx, b->bi[i]->center->index, b->nraw,
               match, mismatch, gap_pen, band_size,
               kdist_cutoff,
               use_kmers ? 1 : 0, b->use_quals ? 1 : 0, gapless ? 1 : 0,
               greedy ? 1 : 0, b->bi[i]->center->reads, ncol,
-              screen, hammings);
+              lambdas, hammings);
 
-  // Pass 2: CPU alignment + lambda for pairs that passed (screen[idx] == -1.0)
   Comparison *comps = (Comparison *) malloc(sizeof(Comparison) * b->nraw);
   if(comps == NULL) Rcpp_stop("Memory allocation failed.");
 
-  #pragma omp parallel for schedule(dynamic, GRAIN_SIZE)
-  for(unsigned int idx = 0; idx < b->nraw; idx++) {
-    Sub *sub;
-    if(screen[idx] == -1.0) {
-      // Passed GPU kmer screen — run full CPU alignment path (byte-identical)
-      // use_kmers=true so CPU does kord_dist check to choose gapless vs banded NW
-      // kdist_cutoff=1.0 so kmer distance check always passes (already screened by GPU)
-      sub = sub_new(b->bi[i]->center, b->raw[idx], match, mismatch, gap_pen, gap_pen,
-                    use_kmers, 1.0, band_size, true, 2, gapless);
-    } else {
-      sub = NULL;  // Shrouded or skipped by GPU
+  if (band_size == 0) {
+    // Fused GPU path: lambdas and hammings already computed
+    for(unsigned int idx = 0; idx < b->nraw; idx++) {
+      comps[idx].i = i;
+      comps[idx].index = idx;
+      comps[idx].lambda = lambdas[idx];
+      comps[idx].hamming = hammings[idx];
     }
-    comps[idx].i = i;
-    comps[idx].index = idx;
-    comps[idx].lambda = compute_lambda_ts(b->raw[idx], sub, ncol, err_mat, b->use_quals);
-    comps[idx].hamming = sub ? sub->nsubs : (unsigned int)(-1);
-    sub_free(sub);
+  } else {
+    // 2-pass: GPU screened, CPU aligns pairs that passed (lambdas[idx] == -1.0)
+    #pragma omp parallel for schedule(dynamic, GRAIN_SIZE)
+    for(unsigned int idx = 0; idx < b->nraw; idx++) {
+      Sub *sub;
+      if(lambdas[idx] == -1.0) {
+        sub = sub_new(b->bi[i]->center, b->raw[idx], match, mismatch, gap_pen, gap_pen,
+                      use_kmers, 1.0, band_size, true, 2, gapless);
+      } else {
+        sub = NULL;
+      }
+      comps[idx].i = i;
+      comps[idx].index = idx;
+      comps[idx].lambda = compute_lambda_ts(b->raw[idx], sub, ncol, err_mat, b->use_quals);
+      comps[idx].hamming = sub ? sub->nsubs : (unsigned int)(-1);
+      sub_free(sub);
+    }
   }
 
-  free(screen);
+  free(lambdas);
   free(hammings);
 
   // Post-process (identical to b_compare_parallel / b_compare_omp)

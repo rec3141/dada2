@@ -22,8 +22,9 @@
 #define BLOCK_SIZE 32        /* Threads per block (reduced for large local memory in NW) */
 #define GAP_GLYPH 9999
 
-/* Error matrix in constant memory: 16 transitions x max 93 quality cols */
-#define MAX_ERR_NCOL 93
+/* Error matrix in constant memory: 16 transitions x max 256 quality cols.
+ * Must accommodate all possible ncol values (quality scores 0-255). */
+#define MAX_ERR_NCOL 256
 __constant__ double d_err_mat[16 * MAX_ERR_NCOL];
 __constant__ unsigned int d_err_ncol;
 
@@ -600,6 +601,69 @@ __device__ double compute_lambda_gpu(
     return lambda;
 }
 
+/* ---- Fused GPU kernel: kmer screen + gapless alignment + lambda ----
+ * Used when band_size=0 (relaxed mode). All computation on GPU. */
+__global__ void compare_kernel_gapless(
+    const char *d_seqs,
+    const uint8_t *d_quals,
+    const uint8_t *d_kmer8,
+    const unsigned int *d_lengths,
+    const unsigned int *d_reads,
+    const int *d_locks,
+    unsigned int center_index,
+    unsigned int nraw,
+    unsigned int max_seqlen,
+    double kdist_cutoff,
+    int use_kmers, int use_quals,
+    int greedy, unsigned int center_reads,
+    unsigned int ncol_err,
+    double *d_lambdas,
+    unsigned int *d_hammings)
+{
+    unsigned int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= nraw) return;
+
+    __shared__ uint8_t center_kmer8[N_KMER];
+    for (int k = threadIdx.x; k < N_KMER; k += blockDim.x)
+        center_kmer8[k] = d_kmer8[center_index * N_KMER + k];
+    __syncthreads();
+
+    if (greedy && d_reads[tid] > center_reads) { d_lambdas[tid] = 0.0; d_hammings[tid] = (unsigned)-1; return; }
+    if (greedy && d_locks[tid]) { d_lambdas[tid] = 0.0; d_hammings[tid] = (unsigned)-1; return; }
+
+    unsigned int len_c = d_lengths[center_index], len_r = d_lengths[tid];
+
+    if (use_kmers) {
+        double kdist = kmer_dist_gpu(center_kmer8, &d_kmer8[tid * N_KMER], len_c, len_r);
+        if (kdist > kdist_cutoff) { d_lambdas[tid] = 0.0; d_hammings[tid] = (unsigned)-1; return; }
+    }
+
+    const char *cs = &d_seqs[center_index * max_seqlen];
+    const char *rs = &d_seqs[tid * max_seqlen];
+    const uint8_t *rq = &d_quals[tid * max_seqlen];
+
+    /* Gapless alignment + lambda fused: single pass over positions */
+    unsigned int minlen = len_c < len_r ? len_c : len_r;
+    double lambda = 1.0;
+    unsigned int nsubs = 0;
+
+    for (unsigned int pos = 0; pos < minlen; pos++) {
+        int nti0 = ((int)cs[pos]) - 1;
+        int nti1 = ((int)rs[pos]) - 1;
+        if (nti0 < 0 || nti0 > 3 || nti1 < 0 || nti1 > 3) { lambda = 0.0; break; }
+        unsigned int qind = use_quals ? (unsigned int)rq[pos] : 0;
+        if (qind >= ncol_err) qind = ncol_err - 1;
+        unsigned int tvec = (nti0 == nti1) ? (nti1 * 4 + nti1) : (nti0 * 4 + nti1);
+        lambda *= d_err_mat[tvec * ncol_err + qind];
+        if (nti0 != nti1) nsubs++;
+    }
+    /* Positions beyond minlen contribute nothing (gaps excluded from lambda) */
+
+    if (lambda < 0.0 || lambda > 1.0) lambda = 0.0;
+    d_lambdas[tid] = lambda;
+    d_hammings[tid] = nsubs;
+}
+
 /* ---- GPU kmer screen kernel ----
  * Only computes kmer distances and greedy checks.
  * Outputs: d_passed[tid] = 1 if pair passed screen, 0 if shrouded/skipped.
@@ -657,40 +721,43 @@ extern "C" void gpu_compare(GpuContext *ctx,
                              unsigned int *hammings) {
     if (!ctx || nraw == 0) return;
 
-    /* Allocate device array for screen results */
-    int *d_passed;
-    cudaMalloc(&d_passed, nraw * sizeof(int));
-
     int grid = (nraw + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
-    kmer_screen_kernel<<<grid, BLOCK_SIZE>>>(
-        ctx->d_kmer8, ctx->d_lengths, ctx->d_reads, ctx->d_locks,
-        center_index, nraw,
-        kdist_cutoff, use_kmers, greedy, center_reads,
-        d_passed);
+    if (band_size == 0) {
+        /* Fused gapless kernel: kmer screen + alignment + lambda all on GPU */
+        compare_kernel_gapless<<<grid, BLOCK_SIZE>>>(
+            ctx->d_seqs, ctx->d_quals, ctx->d_kmer8,
+            ctx->d_lengths, ctx->d_reads, ctx->d_locks,
+            center_index, nraw, ctx->max_seqlen,
+            kdist_cutoff, use_kmers, use_quals,
+            greedy, center_reads, ncol_err,
+            ctx->d_lambdas, ctx->d_hammings);
 
-    /* Copy screen results to host */
-    int *passed = (int *)malloc(nraw * sizeof(int));
-    cudaMemcpy(passed, d_passed, nraw * sizeof(int), cudaMemcpyDeviceToHost);
-    cudaDeviceSynchronize();
-    cudaFree(d_passed);
+        cudaMemcpy(lambdas, ctx->d_lambdas, nraw * sizeof(double), cudaMemcpyDeviceToHost);
+        cudaMemcpy(hammings, ctx->d_hammings, nraw * sizeof(unsigned int), cudaMemcpyDeviceToHost);
+        cudaDeviceSynchronize();
+    } else {
+        /* 2-pass: GPU kmer screen, CPU alignment (byte-identical mode) */
+        int *d_passed;
+        cudaMalloc(&d_passed, nraw * sizeof(int));
 
-    /* Initialize all outputs to shrouded */
-    for (unsigned int i = 0; i < nraw; i++) {
-        lambdas[i] = 0.0;
-        hammings[i] = (unsigned int)(-1);
-    }
+        kmer_screen_kernel<<<grid, BLOCK_SIZE>>>(
+            ctx->d_kmer8, ctx->d_lengths, ctx->d_reads, ctx->d_locks,
+            center_index, nraw,
+            kdist_cutoff, use_kmers, greedy, center_reads,
+            d_passed);
 
-    /* For pairs that passed kmer screen, the caller (b_compare_gpu)
-     * will handle alignment and lambda on CPU. We store the screen
-     * results in the lambdas array: -1.0 means "passed, needs alignment".
-     * 0.0 means "shrouded/skipped". */
-    for (unsigned int i = 0; i < nraw; i++) {
-        if (passed[i]) {
-            lambdas[i] = -1.0;  /* sentinel: needs CPU alignment */
+        int *passed = (int *)malloc(nraw * sizeof(int));
+        cudaMemcpy(passed, d_passed, nraw * sizeof(int), cudaMemcpyDeviceToHost);
+        cudaDeviceSynchronize();
+        cudaFree(d_passed);
+
+        for (unsigned int i = 0; i < nraw; i++) {
+            lambdas[i] = passed[i] ? -1.0 : 0.0;
+            hammings[i] = (unsigned int)(-1);
         }
+        free(passed);
     }
-    free(passed);
 }
 
 extern "C" int gpu_available(void) {

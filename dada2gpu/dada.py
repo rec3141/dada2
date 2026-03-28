@@ -134,15 +134,20 @@ def dada(derep, err=None, error_estimation_function=None, self_consist=False,
                 sse=o["SSE"], gapless=o["GAPLESS"], greedy=o["GREEDY"],
             )
 
-        # Process samples in parallel (each single-threaded, many concurrent)
-        n_workers = min(len(derep), os.cpu_count() or 4)
-        os.environ['OMP_NUM_THREADS'] = '1'
-
-        if n_workers > 1 and len(derep) > 1:
-            with ThreadPoolExecutor(max_workers=n_workers) as pool:
-                results = list(pool.map(_process_sample, derep))
-        else:
+        # Parallel strategy: if GPU available, run sequentially (GPU fast enough).
+        # If CPU-only, run samples in parallel threads (GIL released in ctypes).
+        use_gpu = _cdada.gpu_available()
+        if use_gpu:
+            os.environ['OMP_NUM_THREADS'] = '1'
             results = [_process_sample(d) for d in derep]
+        else:
+            n_workers = min(len(derep), os.cpu_count() or 4)
+            os.environ['OMP_NUM_THREADS'] = '1'
+            if n_workers > 1 and len(derep) > 1:
+                with ThreadPoolExecutor(max_workers=n_workers) as pool:
+                    results = list(pool.map(_process_sample, derep))
+            else:
+                results = [_process_sample(d) for d in derep]
 
         if verbose and self_consist:
             sys.stdout.write("." * len(derep))
