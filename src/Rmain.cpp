@@ -193,6 +193,7 @@ Rcpp::List dada_uniques(std::vector< std::string > seqs, std::vector<int> abunda
       }
       gpu_upload_raws(gpu_ctx, all_seqs, all_quals,
                       use_kmers ? k8 : NULL,
+                      use_kmers ? kord : NULL,
                       lengths, reads_arr, nraw);
       free(all_seqs);
       free(all_quals);

@@ -19,6 +19,7 @@ void gpu_upload_raws(GpuContext *ctx,
                      const char *all_seqs,        /* nraw * max_seqlen, padded */
                      const uint8_t *all_quals,     /* nraw * max_seqlen, padded */
                      const uint8_t *all_kmer8,     /* nraw * 1024 */
+                     const uint16_t *all_kord,     /* nraw * max_seqlen, or NULL */
                      const unsigned int *lengths,  /* nraw */
                      const unsigned int *reads,    /* nraw */
                      unsigned int nraw);

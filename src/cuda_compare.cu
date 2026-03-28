@@ -35,6 +35,7 @@ struct GpuContext {
     char *d_seqs;              /* nraw * max_seqlen */
     uint8_t *d_quals;          /* nraw * max_seqlen */
     uint8_t *d_kmer8;          /* nraw * N_KMER */
+    uint16_t *d_kord;          /* nraw * max_seqlen */
     unsigned int *d_lengths;   /* nraw */
     unsigned int *d_reads;     /* nraw */
     int *d_locks;              /* nraw */
@@ -42,6 +43,7 @@ struct GpuContext {
     /* Output buffers */
     double *d_lambdas;         /* nraw */
     unsigned int *d_hammings;  /* nraw */
+    int *d_needs_nw;           /* nraw: 1 if pair needs banded NW */
 
     /* Dimensions */
     unsigned int max_nraw;
@@ -64,11 +66,13 @@ extern "C" GpuContext* gpu_context_create(unsigned int max_nraw, unsigned int ma
     cudaMalloc(&ctx->d_seqs, (size_t)max_nraw * max_seqlen);
     cudaMalloc(&ctx->d_quals, (size_t)max_nraw * max_seqlen);
     cudaMalloc(&ctx->d_kmer8, (size_t)max_nraw * N_KMER);
+    cudaMalloc(&ctx->d_kord, (size_t)max_nraw * max_seqlen * sizeof(uint16_t));
     cudaMalloc(&ctx->d_lengths, max_nraw * sizeof(unsigned int));
     cudaMalloc(&ctx->d_reads, max_nraw * sizeof(unsigned int));
     cudaMalloc(&ctx->d_locks, max_nraw * sizeof(int));
     cudaMalloc(&ctx->d_lambdas, max_nraw * sizeof(double));
     cudaMalloc(&ctx->d_hammings, max_nraw * sizeof(unsigned int));
+    cudaMalloc(&ctx->d_needs_nw, max_nraw * sizeof(int));
 
     return ctx;
 }
@@ -80,9 +84,11 @@ extern "C" void gpu_context_destroy(GpuContext *ctx) {
     cudaFree(ctx->d_kmer8);
     cudaFree(ctx->d_lengths);
     cudaFree(ctx->d_reads);
+    cudaFree(ctx->d_kord);
     cudaFree(ctx->d_locks);
     cudaFree(ctx->d_lambdas);
     cudaFree(ctx->d_hammings);
+    cudaFree(ctx->d_needs_nw);
     free(ctx);
 }
 
@@ -92,6 +98,7 @@ extern "C" void gpu_upload_raws(GpuContext *ctx,
                                 const char *all_seqs,
                                 const uint8_t *all_quals,
                                 const uint8_t *all_kmer8,
+                                const uint16_t *all_kord,    /* nraw * max_seqlen, or NULL */
                                 const unsigned int *lengths,
                                 const unsigned int *reads,
                                 unsigned int nraw) {
@@ -100,9 +107,10 @@ extern "C" void gpu_upload_raws(GpuContext *ctx,
     cudaMemcpy(ctx->d_seqs, all_seqs, seq_bytes, cudaMemcpyHostToDevice);
     cudaMemcpy(ctx->d_quals, all_quals, seq_bytes, cudaMemcpyHostToDevice);
     cudaMemcpy(ctx->d_kmer8, all_kmer8, (size_t)nraw * N_KMER, cudaMemcpyHostToDevice);
+    if (all_kord)
+        cudaMemcpy(ctx->d_kord, all_kord, (size_t)nraw * ctx->max_seqlen * sizeof(uint16_t), cudaMemcpyHostToDevice);
     cudaMemcpy(ctx->d_lengths, lengths, nraw * sizeof(unsigned int), cudaMemcpyHostToDevice);
     cudaMemcpy(ctx->d_reads, reads, nraw * sizeof(unsigned int), cudaMemcpyHostToDevice);
-    /* Initialize locks to 0 */
     cudaMemset(ctx->d_locks, 0, nraw * sizeof(int));
 }
 
@@ -601,12 +609,40 @@ __device__ double compute_lambda_gpu(
     return lambda;
 }
 
-/* ---- Fused GPU kernel: kmer screen + gapless alignment + lambda ----
- * Used when band_size=0 (relaxed mode). All computation on GPU. */
-__global__ void compare_kernel_gapless(
+/*
+ * Kord distance: compare kmer order vectors position-by-position.
+ * Returns fraction of mismatched positions (0=identical order, 1=completely different).
+ * Matches CPU kord_dist_SSEi logic.
+ */
+__device__ double kord_dist_gpu(const uint16_t *kord1, unsigned int len1,
+                                const uint16_t *kord2, unsigned int len2) {
+    unsigned int minlen = len1 < len2 ? len1 : len2;
+    if (minlen <= KMER_SIZE) return 1.0;
+    unsigned int n_pos = minlen - KMER_SIZE + 1;
+    unsigned int matches = 0;
+    for (unsigned int i = 0; i < n_pos; i++) {
+        if (kord1[i] == kord2[i]) matches++;
+    }
+    return 1.0 - (double)matches / (double)n_pos;
+}
+
+/* ---- Fused GPU kernel: kmer screen + kord check + gapless lambda ----
+ * Pass 1 of the 2-pass approach. For ALL pairs:
+ *   - Compute kmer distance (screen out distant pairs)
+ *   - Compute kord distance to detect if banded NW is needed
+ *   - Compute gapless lambda (fast, no warp divergence)
+ *   - Flag pairs where kord != kmer dist (need CPU banded NW in pass 2)
+ *
+ * Output:
+ *   d_lambdas:  gapless lambda (will be overwritten by CPU for flagged pairs)
+ *   d_hammings: gapless hamming (will be overwritten by CPU for flagged pairs)
+ *   d_needs_nw: 1 if pair needs banded NW on CPU, 0 otherwise
+ */
+__global__ void compare_kernel_2pass(
     const char *d_seqs,
     const uint8_t *d_quals,
     const uint8_t *d_kmer8,
+    const uint16_t *d_kord,
     const unsigned int *d_lengths,
     const unsigned int *d_reads,
     const int *d_locks,
@@ -614,11 +650,12 @@ __global__ void compare_kernel_gapless(
     unsigned int nraw,
     unsigned int max_seqlen,
     double kdist_cutoff,
-    int use_kmers, int use_quals,
+    int use_kmers, int use_quals, int gapless,
     int greedy, unsigned int center_reads,
     unsigned int ncol_err,
     double *d_lambdas,
-    unsigned int *d_hammings)
+    unsigned int *d_hammings,
+    int *d_needs_nw)
 {
     unsigned int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nraw) return;
@@ -628,21 +665,36 @@ __global__ void compare_kernel_gapless(
         center_kmer8[k] = d_kmer8[center_index * N_KMER + k];
     __syncthreads();
 
+    d_needs_nw[tid] = 0;
+
+    /* Greedy checks */
     if (greedy && d_reads[tid] > center_reads) { d_lambdas[tid] = 0.0; d_hammings[tid] = (unsigned)-1; return; }
     if (greedy && d_locks[tid]) { d_lambdas[tid] = 0.0; d_hammings[tid] = (unsigned)-1; return; }
 
     unsigned int len_c = d_lengths[center_index], len_r = d_lengths[tid];
 
+    /* Kmer distance screen */
+    double kdist = 0.0;
     if (use_kmers) {
-        double kdist = kmer_dist_gpu(center_kmer8, &d_kmer8[tid * N_KMER], len_c, len_r);
+        kdist = kmer_dist_gpu(center_kmer8, &d_kmer8[tid * N_KMER], len_c, len_r);
         if (kdist > kdist_cutoff) { d_lambdas[tid] = 0.0; d_hammings[tid] = (unsigned)-1; return; }
     }
 
+    /* Kord distance — detect if banded NW alignment is needed */
+    if (use_kmers && gapless) {
+        double kodist = kord_dist_gpu(&d_kord[center_index * max_seqlen], len_c,
+                                      &d_kord[tid * max_seqlen], len_r);
+        /* CPU logic: if (gapless && kodist == kdist) → use gapless, else → use banded NW */
+        if (kodist != kdist) {
+            d_needs_nw[tid] = 1;  /* Flag for CPU pass 2 */
+        }
+    }
+
+    /* Gapless alignment + lambda (computed for ALL passing pairs, even NW-flagged) */
     const char *cs = &d_seqs[center_index * max_seqlen];
     const char *rs = &d_seqs[tid * max_seqlen];
     const uint8_t *rq = &d_quals[tid * max_seqlen];
 
-    /* Gapless alignment + lambda fused: single pass over positions */
     unsigned int minlen = len_c < len_r ? len_c : len_r;
     double lambda = 1.0;
     unsigned int nsubs = 0;
@@ -657,7 +709,6 @@ __global__ void compare_kernel_gapless(
         lambda *= d_err_mat[tvec * ncol_err + qind];
         if (nti0 != nti1) nsubs++;
     }
-    /* Positions beyond minlen contribute nothing (gaps excluded from lambda) */
 
     if (lambda < 0.0 || lambda > 1.0) lambda = 0.0;
     d_lambdas[tid] = lambda;
@@ -723,41 +774,31 @@ extern "C" void gpu_compare(GpuContext *ctx,
 
     int grid = (nraw + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
-    if (band_size == 0) {
-        /* Fused gapless kernel: kmer screen + alignment + lambda all on GPU */
-        compare_kernel_gapless<<<grid, BLOCK_SIZE>>>(
-            ctx->d_seqs, ctx->d_quals, ctx->d_kmer8,
-            ctx->d_lengths, ctx->d_reads, ctx->d_locks,
-            center_index, nraw, ctx->max_seqlen,
-            kdist_cutoff, use_kmers, use_quals,
-            greedy, center_reads, ncol_err,
-            ctx->d_lambdas, ctx->d_hammings);
+    /* 2-pass kernel: GPU computes gapless lambda for all pairs,
+     * flags those needing banded NW (kord != kmer distance).
+     * CPU (in b_compare_gpu) handles the flagged ~5% with banded NW. */
+    compare_kernel_2pass<<<grid, BLOCK_SIZE>>>(
+        ctx->d_seqs, ctx->d_quals, ctx->d_kmer8, ctx->d_kord,
+        ctx->d_lengths, ctx->d_reads, ctx->d_locks,
+        center_index, nraw, ctx->max_seqlen,
+        kdist_cutoff, use_kmers, use_quals, gapless,
+        greedy, center_reads, ncol_err,
+        ctx->d_lambdas, ctx->d_hammings, ctx->d_needs_nw);
 
-        cudaMemcpy(lambdas, ctx->d_lambdas, nraw * sizeof(double), cudaMemcpyDeviceToHost);
-        cudaMemcpy(hammings, ctx->d_hammings, nraw * sizeof(unsigned int), cudaMemcpyDeviceToHost);
-        cudaDeviceSynchronize();
-    } else {
-        /* 2-pass: GPU kmer screen, CPU alignment (byte-identical mode) */
-        int *d_passed;
-        cudaMalloc(&d_passed, nraw * sizeof(int));
+    cudaMemcpy(lambdas, ctx->d_lambdas, nraw * sizeof(double), cudaMemcpyDeviceToHost);
+    cudaMemcpy(hammings, ctx->d_hammings, nraw * sizeof(unsigned int), cudaMemcpyDeviceToHost);
 
-        kmer_screen_kernel<<<grid, BLOCK_SIZE>>>(
-            ctx->d_kmer8, ctx->d_lengths, ctx->d_reads, ctx->d_locks,
-            center_index, nraw,
-            kdist_cutoff, use_kmers, greedy, center_reads,
-            d_passed);
+    /* Copy needs_nw flags — encode in lambdas as -1.0 sentinel for CPU pass 2 */
+    int *needs_nw = (int *)malloc(nraw * sizeof(int));
+    cudaMemcpy(needs_nw, ctx->d_needs_nw, nraw * sizeof(int), cudaMemcpyDeviceToHost);
+    cudaDeviceSynchronize();
 
-        int *passed = (int *)malloc(nraw * sizeof(int));
-        cudaMemcpy(passed, d_passed, nraw * sizeof(int), cudaMemcpyDeviceToHost);
-        cudaDeviceSynchronize();
-        cudaFree(d_passed);
-
-        for (unsigned int i = 0; i < nraw; i++) {
-            lambdas[i] = passed[i] ? -1.0 : 0.0;
-            hammings[i] = (unsigned int)(-1);
+    for (unsigned int i = 0; i < nraw; i++) {
+        if (needs_nw[i]) {
+            lambdas[i] = -1.0;  /* sentinel: CPU must recompute with banded NW */
         }
-        free(passed);
     }
+    free(needs_nw);
 }
 
 extern "C" int gpu_available(void) {

@@ -183,7 +183,10 @@ extern "C" DadaResult* dada2_run(
                     lengths[index] = raws[index]->length;
                     reads_arr[index] = raws[index]->reads;
                 }
-                gpu_upload_raws(gpu_ctx, all_seqs, all_quals, use_kmers ? k8 : NULL, lengths, reads_arr, nraw);
+                gpu_upload_raws(gpu_ctx, all_seqs, all_quals,
+                                use_kmers ? k8 : NULL,
+                                use_kmers ? kord : NULL,
+                                lengths, reads_arr, nraw);
                 free(all_seqs); free(all_quals); free(lengths); free(reads_arr);
                 if (verbose) printf("GPU: Data uploaded successfully.\n");
             }
