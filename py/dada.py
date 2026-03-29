@@ -148,7 +148,7 @@ def dada(derep, err=None, error_estimation_function=None, self_consist=False,
     n_workers = int(os.environ.get("DADA2_WORKERS", "0"))
     if n_workers == 0:
         if use_gpu:
-            n_workers = min(len(derep), 4)  # GPU saturates around 4 concurrent
+            n_workers = min(len(derep), 8)  # GPU + CPU NW scales to ~8 concurrent
         else:
             n_workers = min(len(derep), os.cpu_count() or 1)
     use_parallel = len(derep) > 1 and n_workers > 1
