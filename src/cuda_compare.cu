@@ -44,6 +44,11 @@ struct GpuContext {
     unsigned int *d_hammings;  /* nraw */
     int *d_needs_nw;           /* nraw: 1 if pair needs banded NW */
 
+    /* Reusable host-side result buffers */
+    double *h_lambdas;         /* nraw */
+    unsigned int *h_hammings;  /* nraw */
+    int *h_needs_nw;           /* nraw */
+
     /* Dimensions */
     unsigned int max_nraw;
     unsigned int max_seqlen;
@@ -70,6 +75,9 @@ extern "C" GpuContext* gpu_context_create(unsigned int max_nraw, unsigned int ma
     cudaMalloc(&ctx->d_lambdas, max_nraw * sizeof(double));
     cudaMalloc(&ctx->d_hammings, max_nraw * sizeof(unsigned int));
     cudaMalloc(&ctx->d_needs_nw, max_nraw * sizeof(int));
+    cudaMallocHost(&ctx->h_lambdas, max_nraw * sizeof(double));
+    cudaMallocHost(&ctx->h_hammings, max_nraw * sizeof(unsigned int));
+    cudaMallocHost(&ctx->h_needs_nw, max_nraw * sizeof(int));
 
     return ctx;
 }
@@ -86,6 +94,9 @@ extern "C" void gpu_context_destroy(GpuContext *ctx) {
     cudaFree(ctx->d_lambdas);
     cudaFree(ctx->d_hammings);
     cudaFree(ctx->d_needs_nw);
+    cudaFreeHost(ctx->h_lambdas);
+    cudaFreeHost(ctx->h_hammings);
+    cudaFreeHost(ctx->h_needs_nw);
     free(ctx);
 }
 
@@ -264,8 +275,9 @@ extern "C" void gpu_compare(GpuContext *ctx,
                              int use_kmers, int use_quals, int gapless,
                              int greedy, unsigned int center_reads,
                              unsigned int ncol_err,
-                             double *lambdas,
-                             unsigned int *hammings) {
+                             double **lambdas,
+                             unsigned int **hammings,
+                             int **needs_nw) {
     if (!ctx || nraw == 0) return;
 
     int grid = (nraw + BLOCK_SIZE - 1) / BLOCK_SIZE;
@@ -281,20 +293,14 @@ extern "C" void gpu_compare(GpuContext *ctx,
         greedy, center_reads, ncol_err,
         ctx->d_lambdas, ctx->d_hammings, ctx->d_needs_nw);
 
-    cudaMemcpy(lambdas, ctx->d_lambdas, nraw * sizeof(double), cudaMemcpyDeviceToHost);
-    cudaMemcpy(hammings, ctx->d_hammings, nraw * sizeof(unsigned int), cudaMemcpyDeviceToHost);
-
-    /* Copy needs_nw flags — encode in lambdas as -1.0 sentinel for CPU pass 2 */
-    int *needs_nw = (int *)malloc(nraw * sizeof(int));
-    cudaMemcpy(needs_nw, ctx->d_needs_nw, nraw * sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(ctx->h_lambdas, ctx->d_lambdas, nraw * sizeof(double), cudaMemcpyDeviceToHost);
+    cudaMemcpy(ctx->h_hammings, ctx->d_hammings, nraw * sizeof(unsigned int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(ctx->h_needs_nw, ctx->d_needs_nw, nraw * sizeof(int), cudaMemcpyDeviceToHost);
     cudaDeviceSynchronize();
 
-    for (unsigned int i = 0; i < nraw; i++) {
-        if (needs_nw[i]) {
-            lambdas[i] = -1.0;  /* sentinel: CPU must recompute with banded NW */
-        }
-    }
-    free(needs_nw);
+    *lambdas = ctx->h_lambdas;
+    *hammings = ctx->h_hammings;
+    *needs_nw = ctx->h_needs_nw;
 }
 
 extern "C" int gpu_available(void) {

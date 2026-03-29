@@ -280,38 +280,40 @@ void b_compare_gpu(B *b, unsigned int i, double *err_mat, unsigned int ncol,
   Raw *raw;
   Comparison comp;
 
-  // Upload current lock states
-  int *locks = (int *) malloc(b->nraw * sizeof(int));
-  if(locks == NULL) Rcpp_stop("Memory allocation failed.");
-  for(index = 0; index < b->nraw; index++) {
-    locks[index] = b->raw[index]->lock ? 1 : 0;
+  // Upload current lock states only when greedy mode uses them
+  if(greedy) {
+    int *locks = (int *) malloc(b->nraw * sizeof(int));
+    if(locks == NULL) Rcpp_stop("Memory allocation failed.");
+    for(index = 0; index < b->nraw; index++) {
+      locks[index] = b->raw[index]->lock ? 1 : 0;
+    }
+    gpu_upload_locks(gpu_ctx, locks, b->nraw);
+    free(locks);
   }
-  gpu_upload_locks(gpu_ctx, locks, b->nraw);
-  free(locks);
 
   // GPU comparison
-  double *lambdas = (double *) malloc(b->nraw * sizeof(double));
-  unsigned int *hammings = (unsigned int *) malloc(b->nraw * sizeof(unsigned int));
-  if(!lambdas || !hammings) Rcpp_stop("Memory allocation failed.");
+  double *lambdas = NULL;
+  unsigned int *hammings = NULL;
+  int *needs_nw = NULL;
 
   gpu_compare(gpu_ctx, b->bi[i]->center->index, b->nraw,
               match, mismatch, gap_pen, band_size,
               kdist_cutoff,
               use_kmers ? 1 : 0, b->use_quals ? 1 : 0, gapless ? 1 : 0,
               greedy ? 1 : 0, b->bi[i]->center->reads, ncol,
-              lambdas, hammings);
+              &lambdas, &hammings, &needs_nw);
 
   Comparison *comps = (Comparison *) malloc(sizeof(Comparison) * b->nraw);
   if(comps == NULL) Rcpp_stop("Memory allocation failed.");
 
-  /* Pass 2: CPU banded NW for pairs flagged by GPU (lambda == -1.0).
+  /* Pass 2: CPU banded NW for pairs flagged by GPU.
    * These are pairs where kord != kmer distance, indicating indels.
    * Typically ~5% of pairs. For unflagged pairs, use GPU gapless lambda. */
   #pragma omp parallel for schedule(dynamic, GRAIN_SIZE)
   for(unsigned int idx = 0; idx < b->nraw; idx++) {
     comps[idx].i = i;
     comps[idx].index = idx;
-    if(lambdas[idx] == -1.0) {
+    if(needs_nw[idx]) {
       /* Needs banded NW — GPU already completed kmer screening, so go
        * straight to the alignment/lambda path on CPU. */
       Sub *sub = sub_new(b->bi[i]->center, b->raw[idx], match, mismatch, gap_pen, gap_pen,
@@ -325,9 +327,6 @@ void b_compare_gpu(B *b, unsigned int i, double *err_mat, unsigned int ncol,
       comps[idx].hamming = hammings[idx];
     }
   }
-
-  free(lambdas);
-  free(hammings);
 
   // Post-process (identical to b_compare_parallel / b_compare_omp)
   for(index = 0, cind = 0; index < b->nraw; index++) {

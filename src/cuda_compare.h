@@ -48,8 +48,9 @@ void gpu_compare(GpuContext *ctx,
                  int use_kmers, int use_quals, int gapless,
                  int greedy, unsigned int center_reads,
                  unsigned int ncol_err,
-                 double *lambdas,           /* out, host */
-                 unsigned int *hammings);   /* out, host */
+                 double **lambdas,          /* out, host-owned by ctx */
+                 unsigned int **hammings,   /* out, host-owned by ctx */
+                 int **needs_nw);           /* out, host-owned by ctx */
 
 /* Check if a CUDA-capable GPU is available (returns 1 if yes) */
 int gpu_available(void);
