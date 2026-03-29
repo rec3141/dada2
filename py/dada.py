@@ -141,13 +141,17 @@ def dada(derep, err=None, error_estimation_function=None, self_consist=False,
     nconsist = 0 if initialize_err else 1  # R starts at 0 for init, 1 otherwise
 
     # Determine parallelism strategy:
-    # - GPU available: run sequentially (GPU is shared resource, already fast)
-    # - CPU only, multiple samples: ThreadPoolExecutor (ctypes releases GIL)
+    # ThreadPoolExecutor works for both GPU and CPU (ctypes releases GIL).
+    # GPU: concurrent contexts time-slice on the GPU + CPU NW runs in parallel.
+    # CPU: each sample runs single-threaded, many samples concurrently.
     use_gpu = _cdada.gpu_available()
     n_workers = int(os.environ.get("DADA2_WORKERS", "0"))
     if n_workers == 0:
-        n_workers = min(len(derep), os.cpu_count() or 1)
-    use_parallel = not use_gpu and len(derep) > 1 and n_workers > 1
+        if use_gpu:
+            n_workers = min(len(derep), 4)  # GPU saturates around 4 concurrent
+        else:
+            n_workers = min(len(derep), os.cpu_count() or 1)
+    use_parallel = len(derep) > 1 and n_workers > 1
 
     while True:
         nconsist += 1
