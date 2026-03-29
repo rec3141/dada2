@@ -274,6 +274,11 @@ def learn_errors(fastq_files, nbases=1e8, error_estimation_function=None,
               f"from {len(dereps)} samples will be used for learning the error rates.")
         print("Initializing error rates to maximum possible estimate.")
 
+    # R's learnErrors wrapper forces OMEGA_C=0 during learning without
+    # changing the general dada() default.
+    opts = dict(opts)
+    opts.setdefault("OMEGA_C", 0)
+
     # Run dada with self-consistency
     results = dada(dereps, err=None, error_estimation_function=error_estimation_function,
                    self_consist=True, verbose=verbose, **opts)
