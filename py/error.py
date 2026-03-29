@@ -1,8 +1,26 @@
 """Error model estimation for DADA2."""
 
+import os
+import ctypes as ct
 import numpy as np
-import subprocess
-import shutil
+
+# Load C loess from libdada2.so
+_lib_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "libdada2.so")
+try:
+    _lib = ct.CDLL(_lib_path)
+    _lib.loess_fit.restype = None
+    _lib.loess_fit.argtypes = [
+        ct.POINTER(ct.c_double), ct.POINTER(ct.c_double), ct.POINTER(ct.c_double),
+        ct.POINTER(ct.c_double), ct.c_int, ct.c_double, ct.c_int,
+    ]
+    _lib.loess_fit_interp.restype = None
+    _lib.loess_fit_interp.argtypes = [
+        ct.POINTER(ct.c_double), ct.POINTER(ct.c_double), ct.POINTER(ct.c_double),
+        ct.POINTER(ct.c_double), ct.c_int, ct.c_double, ct.c_int, ct.c_int,
+    ]
+    _HAS_C_LOESS = True
+except (OSError, AttributeError):
+    _HAS_C_LOESS = False
 
 # Transition row names (matching R's ordering)
 TRANS_NAMES = [
@@ -25,8 +43,26 @@ def _lowess_fit(x, y, weights, span=0.75, degree=2):
     """Weighted LOESS (locally weighted scatterplot smoothing).
 
     Uses local polynomial regression with tricube kernel.
-    Matches R's loess() default: degree=2 (local quadratic), span=0.75.
+    When C library is available, uses Hermite-interpolated evaluation
+    (approximating R's default kdtree-interpolated loess).
+    Falls back to pure Python for direct evaluation.
     """
+    # Use C implementation if available
+    if _HAS_C_LOESS:
+        xc = np.ascontiguousarray(x, dtype=np.float64)
+        yc = np.ascontiguousarray(y, dtype=np.float64)
+        wc = np.ascontiguousarray(weights, dtype=np.float64)
+        out = np.empty(len(x), dtype=np.float64)
+        # Use interpolated mode to approximate R's default behavior
+        _lib.loess_fit_interp(
+            xc.ctypes.data_as(ct.POINTER(ct.c_double)),
+            yc.ctypes.data_as(ct.POINTER(ct.c_double)),
+            wc.ctypes.data_as(ct.POINTER(ct.c_double)),
+            out.ctypes.data_as(ct.POINTER(ct.c_double)),
+            len(x), span, degree, 0,  # 0 = auto nv
+        )
+        return out
+
     n = len(x)
     h = max(int(np.ceil(span * n)), degree + 1)
     y_pred = np.empty(n)
@@ -155,69 +191,6 @@ def loess_errfun(trans):
     err[15] = 1.0 - est[9:12].sum(axis=0)  # T2T
 
     return err
-
-
-_R_LOESS_SCRIPT = r"""
-trans <- matrix(scan('stdin', quiet=TRUE), nrow=16, byrow=TRUE)
-colnames(trans) <- 0:(ncol(trans)-1)
-rownames(trans) <- c('A2A','A2C','A2G','A2T','C2A','C2C','C2G','C2T',
-                      'G2A','G2C','G2G','G2T','T2A','T2C','T2G','T2T')
-qq <- as.numeric(colnames(trans))
-est <- matrix(0, nrow=0, ncol=length(qq))
-for(nti in c('A','C','G','T')) {
-  for(ntj in c('A','C','G','T')) {
-    if(nti != ntj) {
-      errs <- trans[paste0(nti,'2',ntj),]
-      tot <- colSums(trans[paste0(nti,'2',c('A','C','G','T')),])
-      rlogp <- log10((errs+1)/tot)
-      rlogp[is.infinite(rlogp)] <- NA
-      df <- data.frame(q=qq, errs=errs, tot=tot, rlogp=rlogp)
-      mod.lo <- loess(rlogp ~ q, df, weights=tot)
-      pred <- predict(mod.lo, qq)
-      maxrli <- max(which(!is.na(pred)))
-      minrli <- min(which(!is.na(pred)))
-      pred[seq_along(pred)>maxrli] <- pred[[maxrli]]
-      pred[seq_along(pred)<minrli] <- pred[[minrli]]
-      est <- rbind(est, 10^pred)
-    }
-  }
-}
-est[est>0.25] <- 0.25; est[est<1e-7] <- 1e-7
-err <- rbind(1-colSums(est[1:3,]),est[1:3,],est[4,],1-colSums(est[4:6,]),est[5:6,],
-             est[7:8,],1-colSums(est[7:9,]),est[9,],est[10:12,],1-colSums(est[10:12,]))
-cat(paste(as.vector(t(err)), collapse=' '))
-"""
-
-# Cache Rscript path
-_RSCRIPT = shutil.which("Rscript")
-
-
-def loess_errfun_r(trans):
-    """Error estimation using R's loess() for exact match with R dada2.
-
-    Calls Rscript as a subprocess with the transition matrix piped via stdin.
-    One call handles all 12 non-self transitions (~250ms total).
-    Falls back to Python LOESS if Rscript is not available.
-    """
-    if _RSCRIPT is None:
-        return loess_errfun(trans)
-
-    ncol = trans.shape[1]
-    trans_str = " ".join(str(int(x)) for x in trans.flatten())
-
-    try:
-        r = subprocess.run(
-            [_RSCRIPT, "--vanilla", "-e", _R_LOESS_SCRIPT],
-            input=trans_str, capture_output=True, text=True, timeout=30,
-        )
-        if r.returncode != 0:
-            return loess_errfun(trans)  # fallback
-
-        vals = [float(x) for x in r.stdout.strip().split()]
-        err = np.array(vals).reshape(16, ncol)
-        return err
-    except (subprocess.TimeoutExpired, ValueError):
-        return loess_errfun(trans)  # fallback
 
 
 def noqual_errfun(trans):

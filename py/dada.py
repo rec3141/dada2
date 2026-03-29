@@ -6,7 +6,7 @@ import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 from . import _cdada
 from .io import derep_fastq
-from .error import loess_errfun, loess_errfun_r, get_initial_err
+from .error import loess_errfun, get_initial_err
 
 DADA_OPTS = {
     "OMEGA_A": 1e-40,
@@ -109,7 +109,7 @@ def dada(derep, err=None, error_estimation_function=None, self_consist=False,
         OMP_NUM_THREADS: set to 1 before importing for best multi-sample performance
     """
     if error_estimation_function is None:
-        error_estimation_function = loess_errfun_r  # Use R's loess for exact match
+        error_estimation_function = loess_errfun
 
     # Normalize input to list of derep dicts
     if isinstance(derep, str):

@@ -8,7 +8,7 @@ CXXFLAGS = -O3 -fPIC -std=c++11 -DNO_RCPP -DNDEBUG -march=native -fopenmp -Wno-f
 
 # Source files for standalone build (excludes Rmain.cpp, RcppExports.cpp,
 # taxonomy.cpp, chimera.cpp, evaluate.cpp, filter.cpp)
-CSRCS = src/derep.c
+CSRCS = src/derep.c src/loess.c
 
 SRCS = src/dada2_capi.cpp \
        src/paired_capi.cpp \
