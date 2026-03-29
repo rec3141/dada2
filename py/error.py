@@ -1,26 +1,6 @@
 """Error model estimation for DADA2."""
 
-import os
-import ctypes as ct
 import numpy as np
-
-# Load C loess from libdada2.so
-_lib_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "libdada2.so")
-try:
-    _lib = ct.CDLL(_lib_path)
-    _lib.loess_fit.restype = None
-    _lib.loess_fit.argtypes = [
-        ct.POINTER(ct.c_double), ct.POINTER(ct.c_double), ct.POINTER(ct.c_double),
-        ct.POINTER(ct.c_double), ct.c_int, ct.c_double, ct.c_int,
-    ]
-    _lib.loess_fit_interp.restype = None
-    _lib.loess_fit_interp.argtypes = [
-        ct.POINTER(ct.c_double), ct.POINTER(ct.c_double), ct.POINTER(ct.c_double),
-        ct.POINTER(ct.c_double), ct.c_int, ct.c_double, ct.c_int, ct.c_int,
-    ]
-    _HAS_C_LOESS = True
-except (OSError, AttributeError):
-    _HAS_C_LOESS = False
 
 # Transition row names (matching R's ordering)
 TRANS_NAMES = [
@@ -39,64 +19,199 @@ _SELF = [0, 5, 10, 15]  # A2A, C2C, G2G, T2T
 _BASE_ROWS = {0: [0, 1, 2, 3], 1: [4, 5, 6, 7], 2: [8, 9, 10, 11], 3: [12, 13, 14, 15]}
 
 
-def _lowess_fit(x, y, weights, span=0.75, degree=2):
-    """Weighted LOESS (locally weighted scatterplot smoothing).
+def _r_nf(n, span):
+    return max(1, min(n, int(np.floor(n * span + 1e-5))))
 
-    Uses local polynomial regression with tricube kernel.
-    When C library is available, uses Hermite-interpolated evaluation
-    (approximating R's default kdtree-interpolated loess).
-    Falls back to pure Python for direct evaluation.
+
+def _design_matrix_1d(dx, degree):
+    cols = [np.ones_like(dx)]
+    if degree >= 1:
+        cols.append(dx)
+    if degree >= 2:
+        cols.append(dx ** 2)
+    return np.column_stack(cols)
+
+
+def _loess_fit_coeffs_1d(x, y, weights, x_eval, span=0.75, degree=2):
+    """Translate the core R loess local fit for the 1D gaussian case.
+
+    This mirrors the main numerical steps of `ehg127` for our use case:
+    1. squared-distance neighbor search
+    2. tricube neighborhood weights using `rho = dist[nf] * max(1, f)`
+    3. weighted centered polynomial design
+    4. column equilibration
+    5. QR + SVD pseudoinverse solve
     """
-    # Use C implementation if available
-    if _HAS_C_LOESS:
-        xc = np.ascontiguousarray(x, dtype=np.float64)
-        yc = np.ascontiguousarray(y, dtype=np.float64)
-        wc = np.ascontiguousarray(weights, dtype=np.float64)
-        out = np.empty(len(x), dtype=np.float64)
-        # Use interpolated mode to approximate R's default behavior
-        _lib.loess_fit_interp(
-            xc.ctypes.data_as(ct.POINTER(ct.c_double)),
-            yc.ctypes.data_as(ct.POINTER(ct.c_double)),
-            wc.ctypes.data_as(ct.POINTER(ct.c_double)),
-            out.ctypes.data_as(ct.POINTER(ct.c_double)),
-            len(x), span, degree, 0,  # 0 = auto nv
-        )
-        return out
-
     n = len(x)
-    h = max(int(np.ceil(span * n)), degree + 1)
-    y_pred = np.empty(n)
+    nf = _r_nf(n, span)
+    dist = (x - x_eval) ** 2
+    order = np.lexsort((np.arange(n, dtype=np.int64), dist))
+    psi = order[:nf]
 
-    for i in range(n):
-        dists = np.abs(x - x[i])
-        idx = np.argsort(dists)[:h]
-        max_dist = dists[idx[-1]]
-        if max_dist == 0:
-            max_dist = 1.0
+    rho = dist[psi[-1]] * max(1.0, span)
+    if rho <= 0.0:
+        coeffs = np.zeros(degree + 1, dtype=np.float64)
+        coeffs[0] = y[psi[0]]
+        return coeffs
 
-        # Tricube kernel
-        u = dists[idx] / (max_dist * 1.0001)
-        w = (1.0 - u ** 3) ** 3
-        w *= weights[idx]
+    normalized = np.sqrt(dist[psi] / rho)
+    kernel = np.zeros(nf, dtype=np.float64)
+    inside = normalized < 1.0
+    kernel[inside] = (1.0 - normalized[inside] ** 3) ** 3
+    w = np.sqrt(weights[psi] * kernel)
+    if np.all(w == 0.0):
+        coeffs = np.zeros(degree + 1, dtype=np.float64)
+        coeffs[0] = y[psi[0]]
+        return coeffs
 
-        if w.sum() == 0:
-            y_pred[i] = y[i]
-            continue
+    dx = x[psi] - x_eval
+    b = _design_matrix_1d(dx, degree) * w[:, None]
+    eta = y[psi] * w
 
-        # Weighted polynomial regression: y = a0 + a1*(x-xi) + a2*(x-xi)^2 + ...
-        xc = x[idx] - x[i]
-        yi = y[idx]
-        # Build Vandermonde matrix (centered at x[i])
-        V = np.column_stack([xc ** p for p in range(degree + 1)])
-        W = np.diag(w)
-        try:
-            VtW = V.T @ W
-            beta = np.linalg.solve(VtW @ V, VtW @ yi)
-            y_pred[i] = beta[0]  # value at x[i] (xc=0)
-        except np.linalg.LinAlgError:
-            y_pred[i] = np.average(yi, weights=w)
+    col_norm = np.linalg.norm(b, axis=0)
+    col_norm[col_norm == 0.0] = 1.0
+    b_scaled = b / col_norm
 
-    return y_pred
+    q_mat, r_mat = np.linalg.qr(b_scaled, mode="reduced")
+    qty = q_mat.T @ eta
+
+    try:
+        u_mat, sigma, vt_mat = np.linalg.svd(r_mat, full_matrices=False)
+    except np.linalg.LinAlgError:
+        coeffs = np.zeros(degree + 1, dtype=np.float64)
+        coeffs[0] = np.average(y[psi], weights=np.maximum(w, 1e-300))
+        return coeffs
+
+    tol = sigma[0] * (100.0 * np.finfo(np.float64).eps) if sigma.size else 0.0
+    dgamma = np.zeros_like(sigma)
+    keep = sigma > tol
+    if np.any(keep):
+        dgamma[keep] = (u_mat[:, keep].T @ qty) / sigma[keep]
+
+    beta_scaled = vt_mat.T @ dgamma
+    return beta_scaled / col_norm
+
+
+def _loess_fit_point_1d(x, y, weights, x_eval, span=0.75, degree=2):
+    coeffs = _loess_fit_coeffs_1d(x, y, weights, x_eval, span=span, degree=degree)
+    return coeffs[0]
+
+
+def _interp_margin(x):
+    xmin = float(np.min(x))
+    xmax = float(np.max(x))
+    mu = 0.005 * max(xmax - xmin, 1e-10 * max(abs(xmin), abs(xmax)) + 1e-30)
+    return xmin - mu, xmax + mu
+
+
+def _build_loess_tree_1d(x, span, cell=0.2):
+    """Build the 1D interpolation tree used by R's lowesb/lowese path."""
+    order = np.argsort(x, kind="mergesort")
+    xs = x[order]
+    n = len(xs)
+    fc = max(1, int(np.floor(n * span * cell)))
+    left_bound, right_bound = _interp_margin(xs)
+    vertex_map = {left_bound: 0, right_bound: 1}
+    vertices = [left_bound, right_bound]
+
+    def add_vertex(value):
+        value = float(value)
+        found = vertex_map.get(value)
+        if found is not None:
+            return found
+        idx = len(vertices)
+        vertices.append(value)
+        vertex_map[value] = idx
+        return idx
+
+    def build(l, u, left_v, right_v):
+        if (u - l + 1) <= fc:
+            return {"split": None, "left_v": left_v, "right_v": right_v}
+        m = (l + u) // 2
+        split = float(xs[m])
+        if split == vertices[left_v] or split == vertices[right_v]:
+            return {"split": None, "left_v": left_v, "right_v": right_v}
+        split_v = add_vertex(split)
+        return {
+            "split": split,
+            "left": build(l, m, left_v, split_v),
+            "right": build(m + 1, u, split_v, right_v),
+        }
+
+    tree = build(0, n - 1, 0, 1)
+    return order, xs, np.asarray(vertices, dtype=np.float64), tree
+
+
+def _collect_leaf_vertices_1d(node, out):
+    if node["split"] is None:
+        out.add(node["left_v"])
+        out.add(node["right_v"])
+        return
+    _collect_leaf_vertices_1d(node["left"], out)
+    _collect_leaf_vertices_1d(node["right"], out)
+
+
+def _locate_leaf_1d(node, x_eval):
+    while node["split"] is not None:
+        if x_eval <= node["split"]:
+            node = node["left"]
+        else:
+            node = node["right"]
+    return node
+
+
+def _hermite_interp_1d(x_eval, x0, x1, val0, val1, deriv0, deriv1):
+    width = x1 - x0
+    if width == 0.0:
+        return val0
+    h = (x_eval - x0) / width
+    phi0 = (1.0 - h) ** 2 * (1.0 + 2.0 * h)
+    phi1 = h ** 2 * (3.0 - 2.0 * h)
+    psi0 = h * (1.0 - h) ** 2
+    psi1 = h ** 2 * (h - 1.0)
+    return phi0 * val0 + phi1 * val1 + (psi0 * deriv0 + psi1 * deriv1) * width
+
+
+def _lowess_fit(x, y, weights, eval_x=None, span=0.75, degree=2, cell=0.2):
+    """1D LOESS for the DADA2 quality-score fit.
+
+    This intentionally follows the R loess point-fit logic for the
+    `degree=2`, gaussian, one-predictor case used by `loessErrfun`.
+    """
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    weights = np.asarray(weights, dtype=np.float64)
+    if eval_x is None:
+        eval_x = x
+    eval_x = np.asarray(eval_x, dtype=np.float64)
+
+    out = np.empty(len(eval_x), dtype=np.float64)
+    xmin = x.min()
+    xmax = x.max()
+    order, xs, vertices, tree = _build_loess_tree_1d(x, span=span, cell=cell)
+    ys = y[order]
+    ws = weights[order]
+    used_vertices = set()
+    _collect_leaf_vertices_1d(tree, used_vertices)
+    vertex_values = {}
+    for vidx in used_vertices:
+        coeffs = _loess_fit_coeffs_1d(xs, ys, ws, vertices[vidx], span=span, degree=degree)
+        deriv = coeffs[1] if len(coeffs) > 1 else 0.0
+        vertex_values[vidx] = (coeffs[0], deriv)
+
+    for i, x_eval in enumerate(eval_x):
+        if x_eval < xmin or x_eval > xmax:
+            out[i] = np.nan
+        else:
+            leaf = _locate_leaf_1d(tree, float(x_eval))
+            left_v = leaf["left_v"]
+            right_v = leaf["right_v"]
+            x0 = vertices[left_v]
+            x1 = vertices[right_v]
+            v0, d0 = vertex_values[left_v]
+            v1, d1 = vertex_values[right_v]
+            out[i] = _hermite_interp_1d(float(x_eval), x0, x1, v0, v1, d0, d1)
+    return out
 
 
 def loess_errfun(trans):
@@ -147,11 +262,7 @@ def loess_errfun(trans):
             w_valid = tot[valid]
             w_valid = np.maximum(w_valid, 1.0)
 
-            pred_valid = _lowess_fit(x_valid, y_valid, w_valid, span=0.75)
-
-            # Predict for all quality scores by extending edges
-            pred = np.full(ncol, np.nan)
-            pred[valid] = pred_valid
+            pred = _lowess_fit(x_valid, y_valid, w_valid, eval_x=qq, span=0.75)
 
             # Fill NaN edges by repeating boundary values
             first_valid = np.where(valid)[0][0]
