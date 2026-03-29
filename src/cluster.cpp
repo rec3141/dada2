@@ -312,9 +312,10 @@ void b_compare_gpu(B *b, unsigned int i, double *err_mat, unsigned int ncol,
     comps[idx].i = i;
     comps[idx].index = idx;
     if(lambdas[idx] == -1.0) {
-      /* Needs banded NW — run full CPU alignment path */
+      /* Needs banded NW — GPU already completed kmer screening, so go
+       * straight to the alignment/lambda path on CPU. */
       Sub *sub = sub_new(b->bi[i]->center, b->raw[idx], match, mismatch, gap_pen, gap_pen,
-                         use_kmers, 1.0, band_size, true, 2, gapless);
+                         false, 1.0, band_size, true, 2, gapless);
       comps[idx].lambda = compute_lambda_ts(b->raw[idx], sub, ncol, err_mat, b->use_quals);
       comps[idx].hamming = sub ? sub->nsubs : (unsigned int)(-1);
       sub_free(sub);
@@ -529,4 +530,3 @@ void bi_assign_center(Bi *bi) {
   if(bi->center) { strcpy(bi->seq, bi->center->seq); }
   bi->check_locks = true;
 }
-
