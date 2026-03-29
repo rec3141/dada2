@@ -18,7 +18,6 @@
 
 #define KMER_SIZE 5
 #define N_KMER 1024          /* 4^KMER_SIZE */
-#define MAX_SEQLEN 300       /* Max sequence length for GPU kernel local arrays */
 #define BLOCK_SIZE 32        /* Threads per block (reduced for large local memory in NW) */
 #define GAP_GLYPH 9999
 
@@ -56,8 +55,6 @@ struct GpuContext {
 extern "C" GpuContext* gpu_context_create(unsigned int max_nraw, unsigned int max_seqlen) {
     GpuContext *ctx = (GpuContext *) malloc(sizeof(GpuContext));
     if (!ctx) return NULL;
-
-    if (max_seqlen > MAX_SEQLEN) max_seqlen = MAX_SEQLEN;
 
     ctx->max_nraw = max_nraw;
     ctx->max_seqlen = max_seqlen;
@@ -98,7 +95,7 @@ extern "C" void gpu_upload_raws(GpuContext *ctx,
                                 const char *all_seqs,
                                 const uint8_t *all_quals,
                                 const uint8_t *all_kmer8,
-                                const uint16_t *all_kord,    /* nraw * max_seqlen, or NULL */
+                                const uint16_t *all_kord,    /* nraw * ctx->max_seqlen, or NULL */
                                 const unsigned int *lengths,
                                 const unsigned int *reads,
                                 unsigned int nraw) {

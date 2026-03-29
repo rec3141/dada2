@@ -12,7 +12,6 @@
 #include <zlib.h>
 
 #define HASH_SIZE (1 << 20)
-#define MAX_SEQ_LEN 1024
 
 typedef struct Entry {
     char *seq;
@@ -51,6 +50,37 @@ static unsigned int hash_seq(const char *s, int len) {
     return h & (HASH_SIZE - 1);
 }
 
+static int gz_readline(gzFile gz, char **buf, size_t *cap, int *line_len) {
+    int ch;
+    size_t len = 0;
+
+    if (!buf || !cap || !line_len) return 0;
+    if (!*buf || *cap == 0) {
+        *cap = 1024;
+        *buf = (char *)malloc(*cap);
+        if (!*buf) return 0;
+    }
+
+    while ((ch = gzgetc(gz)) != -1) {
+        if (len + 1 >= *cap) {
+            size_t new_cap = (*cap) * 2;
+            char *tmp = (char *)realloc(*buf, new_cap);
+            if (!tmp) return 0;
+            *buf = tmp;
+            *cap = new_cap;
+        }
+        (*buf)[len++] = (char)ch;
+        if (ch == '\n') break;
+    }
+
+    if (len == 0 && ch == -1) return 0;
+
+    while (len > 0 && ((*buf)[len - 1] == '\n' || (*buf)[len - 1] == '\r')) len--;
+    (*buf)[len] = '\0';
+    *line_len = (int)len;
+    return 1;
+}
+
 /* Global pool pointer for sort comparator */
 static char *g_pool;
 static int cmp_read_by_seq(const void *a, const void *b) {
@@ -70,40 +100,74 @@ DerepResult* derep_fastq_c(const char *filepath) {
     int read_cap = 65536, pool_cap = 65536 * 300, pool_used = 0, n_reads = 0, max_len = 0;
     ReadRec *reads = (ReadRec *)malloc(read_cap * sizeof(ReadRec));
     char *pool = (char *)malloc(pool_cap);
-    char buf[MAX_SEQ_LEN * 2];
+    char *line = NULL;
+    size_t line_cap = 0;
+    char *seq_line = NULL;
+    size_t seq_cap = 0;
 
-    while (gzgets(gz, buf, sizeof(buf))) {  /* header */
+    if (!reads || !pool) {
+        free(reads);
+        free(pool);
+        gzclose(gz);
+        return NULL;
+    }
+
+    while (1) {  /* header */
+        int line_len = 0;
+        if (!gz_readline(gz, &line, &line_cap, &line_len)) break;
+
         /* sequence */
-        if (!gzgets(gz, buf, sizeof(buf))) break;
-        int slen = strlen(buf);
-        while (slen > 0 && (buf[slen-1] == '\n' || buf[slen-1] == '\r')) slen--;
-        buf[slen] = '\0';
+        if (!gz_readline(gz, &line, &line_cap, &line_len)) break;
+        int slen = line_len;
+        if ((size_t)(slen + 1) > seq_cap) {
+            size_t new_cap = (size_t)(slen + 1);
+            char *tmp = (char *)realloc(seq_line, new_cap);
+            if (!tmp) {
+                free(reads);
+                free(pool);
+                free(line);
+                free(seq_line);
+                gzclose(gz);
+                return NULL;
+            }
+            seq_line = tmp;
+            seq_cap = new_cap;
+        }
         for (int i = 0; i < slen; i++)
-            if (buf[i] >= 'a' && buf[i] <= 'z') buf[i] -= 32;
-        if (slen >= MAX_SEQ_LEN) { slen = MAX_SEQ_LEN - 1; buf[slen] = '\0'; }
+            if (line[i] >= 'a' && line[i] <= 'z') line[i] -= 32;
+        memcpy(seq_line, line, (size_t)slen + 1);
         if (slen > max_len) max_len = slen;
 
         /* + line */
-        char plus[MAX_SEQ_LEN * 2];
-        if (!gzgets(gz, plus, sizeof(plus))) break;
+        if (!gz_readline(gz, &line, &line_cap, &line_len)) break;
 
         /* quality */
-        char qbuf[MAX_SEQ_LEN * 2];
-        if (!gzgets(gz, qbuf, sizeof(qbuf))) break;
-        int qlen = strlen(qbuf);
-        while (qlen > 0 && (qbuf[qlen-1] == '\n' || qbuf[qlen-1] == '\r')) qlen--;
+        if (!gz_readline(gz, &line, &line_cap, &line_len)) break;
+        int qlen = line_len;
 
         /* Grow pool */
         int need = slen + 1 + qlen + 1;
         while (pool_used + need > pool_cap) { pool_cap *= 2; pool = (char *)realloc(pool, pool_cap); }
+        if (!pool) {
+            free(reads);
+            free(line);
+            gzclose(gz);
+            return NULL;
+        }
 
         int seq_off = pool_used;
-        memcpy(pool + pool_used, buf, slen + 1); pool_used += slen + 1;
+        memcpy(pool + pool_used, seq_line, slen + 1); pool_used += slen + 1;
         int qual_off = pool_used;
-        memcpy(pool + pool_used, qbuf, qlen + 1); pool_used += qlen + 1;
+        memcpy(pool + pool_used, line, qlen + 1); pool_used += qlen + 1;
 
         /* Grow reads */
         if (n_reads >= read_cap) { read_cap *= 2; reads = (ReadRec *)realloc(reads, read_cap * sizeof(ReadRec)); }
+        if (!reads) {
+            free(pool);
+            free(line);
+            gzclose(gz);
+            return NULL;
+        }
         reads[n_reads].seq_offset = seq_off;
         reads[n_reads].qual_offset = qual_off;
         reads[n_reads].seq_len = slen;
@@ -111,6 +175,8 @@ DerepResult* derep_fastq_c(const char *filepath) {
         n_reads++;
     }
     gzclose(gz);
+    free(line);
+    free(seq_line);
 
     /* Phase 2: Sort reads by sequence (lexical) to match R's srsort */
     g_pool = pool;
