@@ -139,7 +139,7 @@ def dada(derep, err=None, error_estimation_function=None, self_consist=False,
         raise ValueError("Error matrix (err) must be provided unless self_consist=True")
 
     err_history = []
-    nconsist = -1 if initialize_err else 0  # R: init at 0, then 1..MAX_CONSIST
+    nconsist = 0 if initialize_err else 1  # R: init at 0, otherwise start at 1
 
     # Determine parallelism strategy:
     # ThreadPoolExecutor works for both GPU and CPU (ctypes releases GIL).
@@ -159,10 +159,12 @@ def dada(derep, err=None, error_estimation_function=None, self_consist=False,
     use_parallel = len(derep) > 1 and n_workers > 1
 
     while True:
-        nconsist += 1
         if verbose and self_consist:
             sys.stdout.write(f"   selfConsist step {nconsist}")
             sys.stdout.flush()
+
+        if nconsist > 0:
+            err_history.append(err.copy())
 
         # R uses MAX_CLUST=1 on the initialization pass (nconsist==1 after init)
         max_clust_iter = 1 if initialize_err else o["MAX_CLUST"]
@@ -201,13 +203,21 @@ def dada(derep, err=None, error_estimation_function=None, self_consist=False,
         cur_trans = _accumulate_trans(trans_list)
 
         # Estimate new error rates
-        new_err = error_estimation_function(cur_trans)
+        err = error_estimation_function(cur_trans)
 
         # Check convergence
         if not self_consist:
             break
 
-        converged = any(np.array_equal(new_err, h) for h in err_history)
+        # After initialization pass: set self-transitions to 1.0 (matching R)
+        if initialize_err:
+            err[0, :] = 1.0   # A2A
+            err[5, :] = 1.0   # C2C
+            err[10, :] = 1.0  # G2G
+            err[15, :] = 1.0  # T2T
+            initialize_err = False
+
+        converged = any(np.array_equal(err, h) for h in err_history)
         if converged:
             if verbose:
                 print(f"Convergence after {nconsist} rounds.")
@@ -218,21 +228,12 @@ def dada(derep, err=None, error_estimation_function=None, self_consist=False,
                 print(f"Self-consistency loop terminated before convergence.")
             break
 
-        err_history.append(err.copy())
-        err = new_err
-
-        # After initialization pass: set self-transitions to 1.0 (matching R)
-        if initialize_err:
-            err[0, :] = 1.0   # A2A
-            err[5, :] = 1.0   # C2C
-            err[10, :] = 1.0  # G2G
-            err[15, :] = 1.0  # T2T
-            initialize_err = False
+        nconsist += 1
 
     # Attach error info to results
     for res in results:
-        res["err_in"] = err
-        res["err_out"] = new_err
+        res["err_in"] = list(err_history) if self_consist else err_history[0]
+        res["err_out"] = err
 
     if single:
         return results[0]
