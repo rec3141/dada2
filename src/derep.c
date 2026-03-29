@@ -40,8 +40,12 @@ typedef struct {
 } DerepResult;
 
 static int cmp_entry_desc(const void *a, const void *b) {
-    int ca = (*(Entry **)a)->count, cb = (*(Entry **)b)->count;
-    return (cb > ca) - (cb < ca);
+    const Entry *ea = *(Entry **)a;
+    const Entry *eb = *(Entry **)b;
+    if (ea->count != eb->count) {
+        return (eb->count > ea->count) - (eb->count < ea->count);
+    }
+    return (ea->insert_id > eb->insert_id) - (ea->insert_id < eb->insert_id);
 }
 
 static unsigned int hash_seq(const char *s, int len) {
