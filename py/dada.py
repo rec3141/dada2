@@ -3,7 +3,7 @@
 import sys
 import os
 import numpy as np
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from . import _cdada
 from .io import derep_fastq
 from .error import loess_errfun, get_initial_err
@@ -142,9 +142,10 @@ def dada(derep, err=None, error_estimation_function=None, self_consist=False,
     nconsist = 0 if initialize_err else 1  # R: init at 0, otherwise start at 1
 
     # Determine parallelism strategy:
-    # ThreadPoolExecutor works for both GPU and CPU (ctypes releases GIL).
-    # GPU: concurrent contexts time-slice on the GPU + CPU NW runs in parallel.
-    # CPU: each sample runs single-threaded, many samples concurrently.
+    # GPU work stays on threads because the native path manages CUDA contexts
+    # per call and may interleave CPU fallback work.
+    # CPU-only work must use processes, not threads: the standalone shared
+    # library is not thread-safe across concurrent run_dada invocations.
     use_gpu = _cdada.gpu_available()
     n_workers = int(os.environ.get("DADA2_WORKERS", "0"))
     if n_workers == 0:
@@ -177,9 +178,10 @@ def dada(derep, err=None, error_estimation_function=None, self_consist=False,
             erri = np.hstack([erri, extra])
 
         if use_parallel:
-            # Parallel: ThreadPoolExecutor (ctypes calls release the GIL)
+            # Parallel multi-sample execution.
             work_args = [(drp, erri, o, max_clust_iter) for drp in derep]
-            with ThreadPoolExecutor(max_workers=n_workers) as pool:
+            executor_cls = ThreadPoolExecutor if use_gpu else ProcessPoolExecutor
+            with executor_cls(max_workers=n_workers) as pool:
                 results = list(pool.map(_run_one_sample, work_args))
             if verbose and self_consist:
                 sys.stdout.write("." * len(derep))
