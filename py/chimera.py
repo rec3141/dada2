@@ -131,13 +131,15 @@ def remove_bimera_denovo(seqtab, method="consensus", min_fold=1.5,
         nsam = result["nsam"]
 
         # Apply consensus logic (matching R's isBimeraDenovoTable)
+        # R logic: flag if nflag > 0 AND
+        #   (nflag >= nsam OR nflag >= (nsam - ignoreNNegatives) * minSampleFraction)
         is_chimera = np.zeros(ncol, dtype=bool)
         for j in range(ncol):
-            if nsam[j] <= 0:
+            if nflag[j] <= 0 or nsam[j] <= 0:
                 continue
-            frac = nflag[j] / nsam[j]
-            if frac >= min_sample_fraction or \
-               nflag[j] >= (nsam[j] - ignore_n_negatives):
+            if nflag[j] >= nsam[j]:
+                is_chimera[j] = True
+            elif nflag[j] >= (nsam[j] - ignore_n_negatives) * min_sample_fraction:
                 is_chimera[j] = True
     else:
         raise ValueError("method must be 'consensus', 'pooled', or 'per-sample'")
