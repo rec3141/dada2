@@ -44,7 +44,7 @@ def _run_one_sample(args):
     try:
         _cd = _cdada  # ThreadPoolExecutor: module already imported
     except NameError:
-        from dada2gpu import _cdada as _cd  # ProcessPoolExecutor: reimport
+        from py import _cdada as _cd  # ProcessPoolExecutor: reimport
 
     seqs = drp["seqs"]
     if len(seqs) == 0:
