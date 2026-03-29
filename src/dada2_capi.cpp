@@ -265,23 +265,46 @@ extern "C" DadaResult* dada2_run(
 
     char oseq[SEQLEN];
     for (i = 0; i < bb->nclust; i++) {
-        /* Find most abundant raw as representative */
-        Raw *max_raw = bb->bi[i]->center;
-        int2nt(oseq, max_raw->seq);
-        res->cluster_seqs[i] = strdup(oseq);
-        res->cluster_abunds[i] = bb->bi[i]->reads;
-        res->cluster_nunq[i] = bb->bi[i]->nraw;
-        res->cluster_pval[i] = bb->bi[i]->birth_pval;
+        /* Match R's clustering data.frame construction exactly:
+         * representative sequence is the most abundant raw in the cluster,
+         * but abundance/n0/n1/nunq count only raws that remain correct. */
+        Raw *max_raw = NULL;
+        unsigned int max_reads = 0;
+        unsigned int max0 = 0, max1 = 0;
+        int abund = 0;
+        int nunq = 0;
 
-        /* Count n0 (abundance of center) and n1 (2nd most abundant) */
-        unsigned int max1 = 0, max2 = 0;
         for (r = 0; r < bb->bi[i]->nraw; r++) {
-            unsigned int rd = bb->bi[i]->raw[r]->reads;
-            if (rd > max1) { max2 = max1; max1 = rd; }
-            else if (rd > max2) { max2 = rd; }
+            raw = bb->bi[i]->raw[r];
+            if (raw->reads > max_reads) {
+                max_raw = raw;
+                max_reads = raw->reads;
+            }
+            if (!raw->correct) continue;
+
+            abund += raw->reads;
+            nunq++;
+            if (subs[raw->index]) {
+                if (subs[raw->index]->nsubs == 0) {
+                    max0 += raw->reads;
+                }
+                if (subs[raw->index]->nsubs == 1) {
+                    max1 += raw->reads;
+                }
+            }
         }
-        res->cluster_n0[i] = max1;
-        res->cluster_n1[i] = max2;
+
+        if (!max_raw) {
+            res->cluster_seqs[i] = strdup("");
+        } else {
+            int2nt(oseq, max_raw->seq);
+            res->cluster_seqs[i] = strdup(oseq);
+        }
+        res->cluster_abunds[i] = abund;
+        res->cluster_n0[i] = (int)max0;
+        res->cluster_n1[i] = (int)max1;
+        res->cluster_nunq[i] = nunq;
+        res->cluster_pval[i] = bb->bi[i]->birth_pval;
     }
 
     /* Transition matrix */
