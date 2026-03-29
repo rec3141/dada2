@@ -42,7 +42,7 @@ static void fill_trans_matrix(B *b, Sub **subs, bool has_quals, int ncol_err,
     for (unsigned int i = 0; i < b->nclust; i++) {
         for (unsigned int r = 0; r < b->bi[i]->nraw; r++) {
             Raw *raw = b->bi[i]->raw[r];
-            if (!raw->correct) continue;  /* Skip uncorrected sequences (matches R) */
+            if (!raw->correct) continue;
             Sub *sub = subs[raw->index];
             if (!sub) continue;
 

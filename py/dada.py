@@ -130,7 +130,8 @@ def dada(derep, err=None, error_estimation_function=None, self_consist=False,
     if self_consist and err is None:
         max_q = 0
         for d in derep:
-            max_q = max(max_q, d["quals"].shape[1] if d["quals"].size > 0 else 41)
+            if d["quals"].size > 0 and not np.all(np.isnan(d["quals"])):
+                max_q = max(max_q, int(np.nanmax(d["quals"])) + 1)
         err = get_initial_err(max(41, max_q))
         initialize_err = True
 
@@ -138,7 +139,7 @@ def dada(derep, err=None, error_estimation_function=None, self_consist=False,
         raise ValueError("Error matrix (err) must be provided unless self_consist=True")
 
     err_history = []
-    nconsist = 0 if initialize_err else 1  # R starts at 0 for init, 1 otherwise
+    nconsist = -1 if initialize_err else 0  # R: init at 0, then 1..MAX_CONSIST
 
     # Determine parallelism strategy:
     # ThreadPoolExecutor works for both GPU and CPU (ctypes releases GIL).
@@ -206,7 +207,7 @@ def dada(derep, err=None, error_estimation_function=None, self_consist=False,
         if not self_consist:
             break
 
-        converged = any(np.allclose(new_err, h, atol=1e-10) for h in err_history)
+        converged = any(np.array_equal(new_err, h) for h in err_history)
         if converged:
             if verbose:
                 print(f"Convergence after {nconsist} rounds.")

@@ -1,8 +1,9 @@
 /*
  * derep.c - Fast FASTQ dereplication in C.
  * Reads gzipped FASTQ, deduplicates sequences, averages quality scores.
- * Returns per-read map (read_idx -> unique_idx) for paired-end merging.
- * Called from Python via ctypes.
+ * Quality scores are accumulated in lexical sequence order to match
+ * R's derepFastq (which uses srsort), ensuring identical float
+ * accumulation and thus identical rounded uint8 quality values.
  */
 
 #include <stdio.h>
@@ -10,29 +11,33 @@
 #include <string.h>
 #include <zlib.h>
 
-/* Simple hash map for sequence deduplication */
-#define HASH_SIZE (1 << 20)  /* 1M buckets */
+#define HASH_SIZE (1 << 20)
 #define MAX_SEQ_LEN 1024
-#define MAP_INIT_CAP 65536
 
 typedef struct Entry {
     char *seq;
     int count;
-    double *qual_sum;
+    long *qual_sum;  /* integer accumulation to match R's rowsum on integer matrix */
     int seq_len;
-    int insert_id;      /* first-seen order (before abundance sort) */
+    int insert_id;
     struct Entry *next;
 } Entry;
+
+typedef struct {
+    int seq_offset;   /* offset into pool */
+    int qual_offset;  /* offset into pool */
+    int seq_len;
+    int orig_index;   /* file-order index for map */
+} ReadRec;
 
 typedef struct {
     int n_uniques;
     int n_reads;
     int max_seq_len;
-    /* Sorted by abundance (descending) */
-    char **seqs;        /* n_uniques null-terminated strings */
-    int *abundances;    /* n_uniques */
-    double *quals;      /* n_uniques * max_seq_len, row-major, NaN-padded */
-    int *map;           /* n_reads: read_idx -> sorted unique_idx (0-indexed) */
+    char **seqs;
+    int *abundances;
+    double *quals;
+    int *map;
 } DerepResult;
 
 static int cmp_entry_desc(const void *a, const void *b) {
@@ -40,121 +45,129 @@ static int cmp_entry_desc(const void *a, const void *b) {
     return (cb > ca) - (cb < ca);
 }
 
-/* FNV-1a hash — good avalanche properties for short DNA strings */
 static unsigned int hash_seq(const char *s, int len) {
     unsigned int h = 2166136261u;
-    for (int i = 0; i < len; i++) {
-        h ^= (unsigned char)s[i];
-        h *= 16777619u;
-    }
+    for (int i = 0; i < len; i++) { h ^= (unsigned char)s[i]; h *= 16777619u; }
     return h & (HASH_SIZE - 1);
+}
+
+/* Global pool pointer for sort comparator */
+static char *g_pool;
+static int cmp_read_by_seq(const void *a, const void *b) {
+    const ReadRec *ra = (const ReadRec *)a;
+    const ReadRec *rb = (const ReadRec *)b;
+    int minlen = ra->seq_len < rb->seq_len ? ra->seq_len : rb->seq_len;
+    int c = memcmp(g_pool + ra->seq_offset, g_pool + rb->seq_offset, minlen);
+    if (c != 0) return c;
+    return ra->seq_len - rb->seq_len;
 }
 
 DerepResult* derep_fastq_c(const char *filepath) {
     gzFile gz = gzopen(filepath, "rb");
     if (!gz) return NULL;
 
-    Entry **table = (Entry **)calloc(HASH_SIZE, sizeof(Entry *));
+    /* Phase 1: Read all reads into memory (offsets into pool) */
+    int read_cap = 65536, pool_cap = 65536 * 300, pool_used = 0, n_reads = 0, max_len = 0;
+    ReadRec *reads = (ReadRec *)malloc(read_cap * sizeof(ReadRec));
+    char *pool = (char *)malloc(pool_cap);
+    char buf[MAX_SEQ_LEN * 2];
 
-    char line[MAX_SEQ_LEN * 2];
-    int n_reads = 0, n_uniques = 0, max_len = 0;
-
-    /* Growable array for per-read map (read_idx -> insert_id) */
-    int map_cap = MAP_INIT_CAP;
-    int *raw_map = (int *)malloc(map_cap * sizeof(int));
-
-    /* Parse FASTQ: 4 lines per record */
-    while (gzgets(gz, line, sizeof(line))) {
-        /* Line 1: header (skip) */
-        /* Line 2: sequence */
-        if (!gzgets(gz, line, sizeof(line))) break;
-        int slen = strlen(line);
-        while (slen > 0 && (line[slen-1] == '\n' || line[slen-1] == '\r')) slen--;
-        line[slen] = '\0';
-        /* Uppercase */
+    while (gzgets(gz, buf, sizeof(buf))) {  /* header */
+        /* sequence */
+        if (!gzgets(gz, buf, sizeof(buf))) break;
+        int slen = strlen(buf);
+        while (slen > 0 && (buf[slen-1] == '\n' || buf[slen-1] == '\r')) slen--;
+        buf[slen] = '\0';
         for (int i = 0; i < slen; i++)
-            if (line[i] >= 'a' && line[i] <= 'z') line[i] -= 32;
-
-        if (slen >= MAX_SEQ_LEN) {
-            fprintf(stderr, "derep_fastq_c: sequence length %d exceeds MAX_SEQ_LEN %d, truncating\n",
-                    slen, MAX_SEQ_LEN);
-            slen = MAX_SEQ_LEN - 1;
-            line[slen] = '\0';
-        }
+            if (buf[i] >= 'a' && buf[i] <= 'z') buf[i] -= 32;
+        if (slen >= MAX_SEQ_LEN) { slen = MAX_SEQ_LEN - 1; buf[slen] = '\0'; }
         if (slen > max_len) max_len = slen;
 
-        /* Line 3: + (skip) */
+        /* + line */
         char plus[MAX_SEQ_LEN * 2];
         if (!gzgets(gz, plus, sizeof(plus))) break;
 
-        /* Line 4: quality */
-        char qline[MAX_SEQ_LEN * 2];
-        if (!gzgets(gz, qline, sizeof(qline))) break;
-        int qlen = strlen(qline);
-        while (qlen > 0 && (qline[qlen-1] == '\n' || qline[qlen-1] == '\r')) qlen--;
+        /* quality */
+        char qbuf[MAX_SEQ_LEN * 2];
+        if (!gzgets(gz, qbuf, sizeof(qbuf))) break;
+        int qlen = strlen(qbuf);
+        while (qlen > 0 && (qbuf[qlen-1] == '\n' || qbuf[qlen-1] == '\r')) qlen--;
 
-        /* Hash lookup */
-        unsigned int h = hash_seq(line, slen);
-        Entry *e = table[h];
-        while (e) {
-            if (e->seq_len == slen && memcmp(e->seq, line, slen) == 0) break;
-            e = e->next;
-        }
+        /* Grow pool */
+        int need = slen + 1 + qlen + 1;
+        while (pool_used + need > pool_cap) { pool_cap *= 2; pool = (char *)realloc(pool, pool_cap); }
 
-        if (!e) {
-            /* New unique */
-            e = (Entry *)malloc(sizeof(Entry));
-            e->seq = (char *)malloc(slen + 1);
-            memcpy(e->seq, line, slen + 1);
-            e->seq_len = slen;
-            e->count = 0;
-            e->qual_sum = (double *)calloc(slen, sizeof(double));
-            e->insert_id = n_uniques;
-            e->next = table[h];
-            table[h] = e;
-            n_uniques++;
-        }
+        int seq_off = pool_used;
+        memcpy(pool + pool_used, buf, slen + 1); pool_used += slen + 1;
+        int qual_off = pool_used;
+        memcpy(pool + pool_used, qbuf, qlen + 1); pool_used += qlen + 1;
 
-        e->count++;
-        int mlen = slen < qlen ? slen : qlen;
-        for (int i = 0; i < mlen; i++)
-            e->qual_sum[i] += (double)((unsigned char)qline[i] - 33);
-
-        /* Record map: this read -> insert_id (will remap to sorted index later) */
-        if (n_reads >= map_cap) {
-            map_cap *= 2;
-            raw_map = (int *)realloc(raw_map, map_cap * sizeof(int));
-        }
-        raw_map[n_reads] = e->insert_id;
-
+        /* Grow reads */
+        if (n_reads >= read_cap) { read_cap *= 2; reads = (ReadRec *)realloc(reads, read_cap * sizeof(ReadRec)); }
+        reads[n_reads].seq_offset = seq_off;
+        reads[n_reads].qual_offset = qual_off;
+        reads[n_reads].seq_len = slen;
+        reads[n_reads].orig_index = n_reads;
         n_reads++;
     }
     gzclose(gz);
 
-    /* Collect all entries into array */
+    /* Phase 2: Sort reads by sequence (lexical) to match R's srsort */
+    g_pool = pool;
+    qsort(reads, n_reads, sizeof(ReadRec), cmp_read_by_seq);
+
+    /* Phase 3: Dedup + accumulate qualities in sorted order */
+    Entry **table = (Entry **)calloc(HASH_SIZE, sizeof(Entry *));
+    int n_uniques = 0;
+    int *orig_to_insert = (int *)malloc(n_reads * sizeof(int));  /* orig_index -> insert_id */
+
+    for (int i = 0; i < n_reads; i++) {
+        char *seq = pool + reads[i].seq_offset;
+        int slen = reads[i].seq_len;
+        char *qline = pool + reads[i].qual_offset;
+        int qlen = strlen(qline);
+
+        unsigned int h = hash_seq(seq, slen);
+        Entry *e = table[h];
+        while (e) { if (e->seq_len == slen && memcmp(e->seq, seq, slen) == 0) break; e = e->next; }
+
+        if (!e) {
+            e = (Entry *)malloc(sizeof(Entry));
+            e->seq = (char *)malloc(slen + 1);
+            memcpy(e->seq, seq, slen + 1);
+            e->seq_len = slen;
+            e->count = 0;
+            e->qual_sum = (long *)calloc(slen, sizeof(long));
+            e->insert_id = n_uniques++;
+            e->next = table[h];
+            table[h] = e;
+        }
+
+        e->count++;
+        int mlen = slen < qlen ? slen : qlen;
+        for (int j = 0; j < mlen; j++)
+            e->qual_sum[j] += (long)((unsigned char)qline[j] - 33);
+
+        orig_to_insert[reads[i].orig_index] = e->insert_id;
+    }
+
+    /* Phase 4: Sort by abundance, build remap, build result */
     Entry **all = (Entry **)malloc(n_uniques * sizeof(Entry *));
     int idx = 0;
     for (int i = 0; i < HASH_SIZE; i++) {
         Entry *e = table[i];
-        while (e) {
-            all[idx++] = e;
-            e = e->next;
-        }
+        while (e) { all[idx++] = e; e = e->next; }
     }
-
-    /* Sort by abundance descending */
     qsort(all, n_uniques, sizeof(Entry *), cmp_entry_desc);
 
-    /* Build insert_id -> sorted_index remap table */
     int *remap = (int *)malloc(n_uniques * sizeof(int));
-    for (int i = 0; i < n_uniques; i++)
-        remap[all[i]->insert_id] = i;
+    for (int i = 0; i < n_uniques; i++) remap[all[i]->insert_id] = i;
 
-    /* Remap raw_map from insert_id to sorted index */
+    /* Map: original file order -> abundance-sorted unique index */
     int *sorted_map = (int *)malloc(n_reads * sizeof(int));
     for (int i = 0; i < n_reads; i++)
-        sorted_map[i] = remap[raw_map[i]];
-    free(raw_map);
+        sorted_map[i] = remap[orig_to_insert[i]];
+    free(orig_to_insert);
     free(remap);
 
     /* Build result */
@@ -167,22 +180,22 @@ DerepResult* derep_fastq_c(const char *filepath) {
     res->quals = (double *)malloc((size_t)n_uniques * max_len * sizeof(double));
     res->map = sorted_map;
 
-    /* Fill quals with NaN */
     for (size_t i = 0; i < (size_t)n_uniques * max_len; i++)
-        res->quals[i] = 0.0 / 0.0;  /* NaN */
+        res->quals[i] = 0.0 / 0.0;
 
     for (int i = 0; i < n_uniques; i++) {
-        res->seqs[i] = all[i]->seq;  /* transfer ownership */
+        res->seqs[i] = all[i]->seq;
         res->abundances[i] = all[i]->count;
-        /* Average quality */
         for (int j = 0; j < all[i]->seq_len; j++)
-            res->quals[(size_t)i * max_len + j] = all[i]->qual_sum[j] / all[i]->count;
+            res->quals[(size_t)i * max_len + j] = (double)all[i]->qual_sum[j] / (double)all[i]->count;
         free(all[i]->qual_sum);
         free(all[i]);
     }
     free(all);
-
     free(table);
+    free(reads);
+    free(pool);
+
     return res;
 }
 
