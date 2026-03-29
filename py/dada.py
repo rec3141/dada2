@@ -147,10 +147,14 @@ def dada(derep, err=None, error_estimation_function=None, self_consist=False,
     use_gpu = _cdada.gpu_available()
     n_workers = int(os.environ.get("DADA2_WORKERS", "0"))
     if n_workers == 0:
+        cores = os.cpu_count() or 1
         if use_gpu:
-            n_workers = min(len(derep), 8)  # GPU + CPU NW scales to ~8 concurrent
+            # GPU kernels are fast; CPU NW for ~5% flagged pairs is the bottleneck.
+            # Scale with CPU cores (each worker needs ~1 core for NW), cap at 16
+            # to avoid GPU context scheduling overhead.
+            n_workers = min(len(derep), cores // 2, 16)
         else:
-            n_workers = min(len(derep), os.cpu_count() or 1)
+            n_workers = min(len(derep), cores)
     use_parallel = len(derep) > 1 and n_workers > 1
 
     while True:
