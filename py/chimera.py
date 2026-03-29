@@ -71,7 +71,8 @@ def remove_bimera_denovo(seqtab, method="consensus", min_fold=1.5,
               enough samples (controlled by min_sample_fraction and
               ignore_n_negatives).
             - "pooled": sum across samples, treat as single sample.
-            - "per-sample": not commonly used; same as consensus here.
+            - "per-sample": zero only the sample/ASV cells flagged as
+              chimeric, then drop all-zero ASV columns.
         min_fold: parent fold-abundance threshold.
         min_abund: parent minimum absolute abundance.
         allow_one_off: allow one mismatch in chimera model.
@@ -89,7 +90,8 @@ def remove_bimera_denovo(seqtab, method="consensus", min_fold=1.5,
         dict with:
             "table": numpy int32 array with chimeric columns removed.
             "seqs": list of non-chimeric ASV sequences.
-            "is_chimera": numpy bool array (ncol,) indicating chimeric ASVs.
+            "is_chimera": numpy bool array (ncol,) for "pooled"/"consensus",
+              or numpy bool array (nrow, ncol) for "per-sample".
     """
     if isinstance(seqtab, dict):
         mat = seqtab["table"]
@@ -117,7 +119,7 @@ def remove_bimera_denovo(seqtab, method="consensus", min_fold=1.5,
             match=match, mismatch=mismatch, gap_p=gap_p, max_shift=max_shift
         )
         is_chimera = flags
-    elif method in ("consensus", "per-sample"):
+    elif method == "consensus":
         # Use the table-level C function for consensus detection
         mat_f = np.asfortranarray(mat, dtype=np.int32)
         result = table_bimera(
@@ -141,6 +143,28 @@ def remove_bimera_denovo(seqtab, method="consensus", min_fold=1.5,
                 is_chimera[j] = True
             elif nflag[j] >= (nsam[j] - ignore_n_negatives) * min_sample_fraction:
                 is_chimera[j] = True
+    elif method == "per-sample":
+        per_sample = np.zeros((nrow, ncol), dtype=bool)
+        new_mat = mat.copy()
+        for i in range(nrow):
+            flags = is_bimera_denovo(
+                new_mat[i], seqs,
+                allow_one_off=allow_one_off,
+                min_one_off_par_dist=min_one_off_par_dist,
+                min_fold=min_fold, min_abund=min_abund,
+                match=match, mismatch=mismatch, gap_p=gap_p, max_shift=max_shift
+            )
+            per_sample[i] = flags
+            new_mat[i, flags] = 0
+
+        keep = new_mat.sum(axis=0) > 0
+        new_mat = new_mat[:, keep]
+        new_seqs = [s for s, k in zip(seqs, keep) if k]
+        return {
+            "table": new_mat,
+            "seqs": new_seqs,
+            "is_chimera": per_sample,
+        }
     else:
         raise ValueError("method must be 'consensus', 'pooled', or 'per-sample'")
 
