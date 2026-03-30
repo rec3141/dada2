@@ -3,6 +3,7 @@
 #include <RcppParallel.h>
 #endif
 #include "dada.h"
+#include <chrono>
 // [[Rcpp::interfaces(cpp)]]
 
 /********* ALGORITHM LOGIC *********/
@@ -261,92 +262,6 @@ void b_compare_omp(B *b, unsigned int i, double *err_mat, unsigned int ncol,
   free(comps);
 }
 #endif /* NO_RCPP */
-
-/*
- * GPU-accelerated comparison: 2-pass approach.
- * Pass 1 (GPU): kmer distance screening + greedy checks. Massively parallel.
- * Pass 2 (CPU/OpenMP): alignment + lambda for pairs that passed screen.
- *   Uses the exact same nwalign_vectorized2 as the CPU path, ensuring
- *   byte-identical alignment and lambda values.
- */
-#ifdef HAVE_CUDA
-void b_compare_gpu(B *b, unsigned int i, double *err_mat, unsigned int ncol,
-                   GpuContext *gpu_ctx, unsigned int max_seqlen,
-                   int match, int mismatch, int gap_pen,
-                   bool use_kmers, double kdist_cutoff, int band_size,
-                   bool gapless, bool greedy, bool verbose) {
-  unsigned int index, cind;
-  double lambda;
-  Raw *raw;
-  Comparison comp;
-
-  // Upload current lock states only when greedy mode uses them
-  if(greedy) {
-    int *locks = (int *) malloc(b->nraw * sizeof(int));
-    if(locks == NULL) Rcpp_stop("Memory allocation failed.");
-    for(index = 0; index < b->nraw; index++) {
-      locks[index] = b->raw[index]->lock ? 1 : 0;
-    }
-    gpu_upload_locks(gpu_ctx, locks, b->nraw);
-    free(locks);
-  }
-
-  // GPU comparison
-  double *lambdas = NULL;
-  unsigned int *hammings = NULL;
-  int *needs_nw = NULL;
-
-  gpu_compare(gpu_ctx, b->bi[i]->center->index, b->nraw,
-              match, mismatch, gap_pen, band_size,
-              kdist_cutoff,
-              use_kmers ? 1 : 0, b->use_quals ? 1 : 0, gapless ? 1 : 0,
-              greedy ? 1 : 0, b->bi[i]->center->reads, ncol,
-              &lambdas, &hammings, &needs_nw);
-
-  Comparison *comps = (Comparison *) malloc(sizeof(Comparison) * b->nraw);
-  if(comps == NULL) Rcpp_stop("Memory allocation failed.");
-
-  /* Pass 2: CPU banded NW for pairs flagged by GPU.
-   * These are pairs where kord != kmer distance, indicating indels.
-   * Typically ~5% of pairs. For unflagged pairs, use GPU gapless lambda. */
-  #pragma omp parallel for schedule(dynamic, GRAIN_SIZE)
-  for(unsigned int idx = 0; idx < b->nraw; idx++) {
-    comps[idx].i = i;
-    comps[idx].index = idx;
-    if(needs_nw[idx]) {
-      /* Needs banded NW — GPU already completed kmer screening, so go
-       * straight to the alignment/lambda path on CPU. */
-      Sub *sub = sub_new(b->bi[i]->center, b->raw[idx], match, mismatch, gap_pen, gap_pen,
-                         false, 1.0, band_size, true, 2, gapless);
-      comps[idx].lambda = compute_lambda_ts(b->raw[idx], sub, ncol, err_mat, b->use_quals);
-      comps[idx].hamming = sub ? sub->nsubs : (unsigned int)(-1);
-      sub_free(sub);
-    } else {
-      /* GPU gapless lambda is correct */
-      comps[idx].lambda = lambdas[idx];
-      comps[idx].hamming = hammings[idx];
-    }
-  }
-
-  // Post-process (identical to b_compare_parallel / b_compare_omp)
-  for(index = 0, cind = 0; index < b->nraw; index++) {
-    b->nalign++;
-    raw = b->raw[index];
-    comp = comps[index];
-    lambda = comp.lambda;
-    if(lambda < 0 || lambda > 1) Rcpp_stop("Lambda out-of-range error.");
-    if(index == b->bi[i]->center->index) { b->bi[i]->self = lambda; }
-    if(lambda * b->reads > raw->E_minmax) {
-      if(lambda * b->bi[i]->center->reads > raw->E_minmax) {
-        raw->E_minmax = lambda * b->bi[i]->center->reads;
-      }
-      b->bi[i]->comp.push_back(comp);
-      if(i == 0 || raw == b->bi[i]->center) { raw->comp = comp; }
-    }
-  }
-  free(comps);
-}
-#endif
 
 /* b_shuffle2:
  move each sequence to the bi that produces the highest expected

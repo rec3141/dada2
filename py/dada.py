@@ -3,7 +3,7 @@
 import sys
 import os
 import numpy as np
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
 from . import _cdada
 from .io import derep_fastq
 from .error import loess_errfun, get_initial_err
@@ -40,7 +40,7 @@ def _run_one_sample(args):
     ProcessPoolExecutor. For ProcessPoolExecutor, re-imports _cdada
     in each subprocess since ctypes handles can't be pickled.
     """
-    drp, erri, opts, max_clust = args
+    drp, erri, opts, max_clust, verbose = args
     try:
         _cd = _cdada  # ThreadPoolExecutor: module already imported
     except NameError:
@@ -65,7 +65,7 @@ def _run_one_sample(args):
         min_abund=opts["MIN_ABUNDANCE"],
         use_quals=opts["USE_QUALS"], vectorized_alignment=opts["VECTORIZED_ALIGNMENT"],
         homo_gap_pen=homo_gap,
-        multithread=False, verbose=False,
+        multithread=False, verbose=verbose,
         sse=opts["SSE"], gapless=opts["GAPLESS"], greedy=opts["GREEDY"],
     )
 
@@ -141,22 +141,13 @@ def dada(derep, err=None, error_estimation_function=None, self_consist=False,
     err_history = []
     nconsist = 0 if initialize_err else 1  # R: init at 0, otherwise start at 1
 
-    # Determine parallelism strategy:
-    # GPU work stays on threads because the native path manages CUDA contexts
-    # per call and may interleave CPU fallback work.
-    # CPU-only work must use processes, not threads: the standalone shared
-    # library is not thread-safe across concurrent run_dada invocations.
-    use_gpu = _cdada.gpu_available()
+    # CPU-only standalone work must use processes, not threads:
+    # the shared library is not thread-safe across concurrent run_dada
+    # invocations.
     n_workers = int(os.environ.get("DADA2_WORKERS", "0"))
     if n_workers == 0:
         cores = os.cpu_count() or 1
-        if use_gpu:
-            # GPU kernels are fast; CPU NW for ~5% flagged pairs is the bottleneck.
-            # Scale with CPU cores (each worker needs ~1 core for NW), cap at 16
-            # to avoid GPU context scheduling overhead.
-            n_workers = min(len(derep), cores // 2, 16)
-        else:
-            n_workers = min(len(derep), cores)
+        n_workers = min(len(derep), cores)
     use_parallel = len(derep) > 1 and n_workers > 1
 
     while True:
@@ -179,9 +170,8 @@ def dada(derep, err=None, error_estimation_function=None, self_consist=False,
 
         if use_parallel:
             # Parallel multi-sample execution.
-            work_args = [(drp, erri, o, max_clust_iter) for drp in derep]
-            executor_cls = ThreadPoolExecutor if use_gpu else ProcessPoolExecutor
-            with executor_cls(max_workers=n_workers) as pool:
+            work_args = [(drp, erri, o, max_clust_iter, verbose) for drp in derep]
+            with ProcessPoolExecutor(max_workers=n_workers) as pool:
                 results = list(pool.map(_run_one_sample, work_args))
             if verbose and self_consist:
                 sys.stdout.write("." * len(derep))
@@ -193,7 +183,7 @@ def dada(derep, err=None, error_estimation_function=None, self_consist=False,
                 if verbose and self_consist:
                     sys.stdout.write(".")
                     sys.stdout.flush()
-                res = _run_one_sample((drp, erri, o, max_clust_iter))
+                res = _run_one_sample((drp, erri, o, max_clust_iter, verbose))
                 results.append(res)
 
         trans_list = [r["trans"] for r in results]

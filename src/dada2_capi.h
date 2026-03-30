@@ -58,7 +58,6 @@ DadaResult* dada2_run(
 );
 
 void dada2_result_free(DadaResult *res);
-int dada2_gpu_available(void);
 
 /* Taxonomy assignment result */
 typedef struct {

@@ -215,16 +215,6 @@ double compute_lambda(Raw *raw, Sub *sub, Rcpp::NumericMatrix errMat, bool use_q
 double compute_lambda_ts(Raw *raw, Sub *sub, unsigned int ncol, double *err_mat, bool use_quals);
 double get_self(char *seq, double err[4][4]);
 
-// methods implemented in cluster.cpp (GPU)
-#ifdef HAVE_CUDA
-#include "cuda_compare.h"
-void b_compare_gpu(B *b, unsigned int i, double *err_mat, unsigned int ncol,
-                   GpuContext *gpu_ctx, unsigned int max_seqlen,
-                   int match, int mismatch, int gap_pen,
-                   bool use_kmers, double kdist_cutoff, int band_size,
-                   bool gapless, bool greedy, bool verbose);
-#endif
-
 // methods implemented in error.cpp
 #ifndef NO_RCPP
 Rcpp::DataFrame b_make_clustering_df(B *b, Sub **subs, Sub **birth_subs, bool has_quals);

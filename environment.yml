@@ -1,7 +1,6 @@
-name: dada2-gpu-dev
+name: dada2-dev
 channels:
   - conda-forge
-  - nvidia
 dependencies:
   - python=3.12
   - numpy
@@ -11,7 +10,3 @@ dependencies:
   - zlib
   - gcc_linux-64
   - gxx_linux-64
-  # GPU build/test toolchain. If you only need CPU builds, these can be removed.
-  - cuda-nvcc=13.0
-  - cuda-cudart-dev=13.0
-

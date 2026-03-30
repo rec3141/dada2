@@ -52,14 +52,6 @@ _lib.dada2_run.argtypes = [
 _lib.dada2_result_free.restype = None
 _lib.dada2_result_free.argtypes = [ct.POINTER(DadaResult)]
 
-_lib.dada2_gpu_available.restype = ct.c_int
-_lib.dada2_gpu_available.argtypes = []
-
-
-def gpu_available():
-    return bool(_lib.dada2_gpu_available())
-
-
 def run_dada(seqs, abundances, err_mat, quals=None, priors=None,
              match=5, mismatch=-4, gap_pen=-8,
              use_kmers=True, kdist_cutoff=0.42, band_size=16,

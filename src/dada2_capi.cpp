@@ -15,10 +15,6 @@
 #include "dada.h"
 #include "dada2_capi.h"
 
-#ifdef HAVE_CUDA
-#include "cuda_compare.h"
-#endif
-
 /* Forward declaration of the standalone run_dada */
 static B *run_dada_c(Raw **raws, int nraw, double *err_mat, int ncol_err,
                      int match, int mismatch, int gap_pen, int homo_gap_pen,
@@ -26,11 +22,7 @@ static B *run_dada_c(Raw **raws, int nraw, double *err_mat, int ncol_err,
                      double omegaA, double omegaP, bool detect_singletons,
                      int max_clust, double min_fold, int min_hamming, int min_abund,
                      bool use_quals, bool vectorized_alignment,
-                     bool multithread, bool verbose, int SSE, bool gapless, bool greedy
-#ifdef HAVE_CUDA
-                     , GpuContext *gpu_ctx, unsigned int gpu_max_seqlen
-#endif
-                     );
+                     bool multithread, bool verbose, int SSE, bool gapless, bool greedy);
 
 /* Build transition matrix from clustering (mirrors b_make_transition_by_quality_matrix) */
 static void fill_trans_matrix(B *b, Sub **subs, bool has_quals, int ncol_err,
@@ -172,40 +164,6 @@ extern "C" DadaResult* dada2_run(
     }
     memcpy(err_mat_c, err_mat, 16 * ncol_err * sizeof(double));
 
-#ifdef HAVE_CUDA
-    /* GPU setup */
-    GpuContext *gpu_ctx = NULL;
-    bool use_gpu = dada2_gpu_available() && (homo_gap_pen == gap_pen);
-    if (use_gpu) {
-        if (verbose) printf("GPU: Initializing CUDA context for %d sequences (maxlen=%d)...\n", nraw, actual_maxlen);
-        gpu_ctx = gpu_context_create(nraw, actual_maxlen);
-        if (gpu_ctx) {
-            char *all_seqs = (char *)calloc((size_t)nraw * actual_maxlen, 1);
-            uint8_t *all_quals = (uint8_t *)calloc((size_t)nraw * actual_maxlen, 1);
-            unsigned int *lengths = (unsigned int *)malloc(nraw * sizeof(unsigned int));
-            unsigned int *reads_arr = (unsigned int *)malloc(nraw * sizeof(unsigned int));
-            if (!all_seqs || !all_quals || !lengths || !reads_arr) {
-                fprintf(stderr, "GPU memory allocation failed.\n");
-                gpu_context_destroy(gpu_ctx); gpu_ctx = NULL;
-            } else {
-                for (index = 0; index < (unsigned)nraw; index++) {
-                    memcpy(&all_seqs[(size_t)index * actual_maxlen], raws[index]->seq, raws[index]->length);
-                    if (raws[index]->qual)
-                        memcpy(&all_quals[(size_t)index * actual_maxlen], raws[index]->qual, raws[index]->length);
-                    lengths[index] = raws[index]->length;
-                    reads_arr[index] = raws[index]->reads;
-                }
-                gpu_upload_raws(gpu_ctx, all_seqs, all_quals,
-                                use_kmers ? k8 : NULL,
-                                use_kmers ? kord : NULL,
-                                lengths, reads_arr, nraw);
-                free(all_seqs); free(all_quals); free(lengths); free(reads_arr);
-                if (verbose) printf("GPU: Data uploaded successfully.\n");
-            }
-        }
-    }
-#endif
-
     /* Run DADA algorithm */
     B *bb = run_dada_c(raws, nraw, err_mat_c, ncol_err,
                        match, mismatch, gap_pen, homo_gap_pen,
@@ -213,15 +171,7 @@ extern "C" DadaResult* dada2_run(
                        omegaA, omegaP, detect_singletons,
                        max_clust, min_fold, min_hamming, min_abund,
                        use_quals, vectorized_alignment,
-                       multithread, verbose, SSE, gapless, greedy
-#ifdef HAVE_CUDA
-                       , gpu_ctx, actual_maxlen
-#endif
-                       );
-
-#ifdef HAVE_CUDA
-    if (gpu_ctx) { gpu_context_destroy(gpu_ctx); gpu_ctx = NULL; }
-#endif
+                       multithread, verbose, SSE, gapless, greedy);
 
     /* Build final alignments for output */
     Sub **subs = (Sub **)malloc(bb->nraw * sizeof(Sub *));
@@ -350,14 +300,6 @@ extern "C" void dada2_result_free(DadaResult *res) {
     free(res);
 }
 
-extern "C" int dada2_gpu_available(void) {
-#ifdef HAVE_CUDA
-    return gpu_available();
-#else
-    return 0;
-#endif
-}
-
 /* Standalone run_dada (mirrors Rmain.cpp::run_dada but takes flat arrays) */
 static B *run_dada_c(Raw **raws, int nraw, double *err_mat, int ncol_err,
                      int match, int mismatch, int gap_pen, int homo_gap_pen,
@@ -365,28 +307,15 @@ static B *run_dada_c(Raw **raws, int nraw, double *err_mat, int ncol_err,
                      double omegaA, double omegaP, bool detect_singletons,
                      int max_clust, double min_fold, int min_hamming, int min_abund,
                      bool use_quals, bool vectorized_alignment,
-                     bool multithread, bool verbose, int SSE, bool gapless, bool greedy
-#ifdef HAVE_CUDA
-                     , GpuContext *gpu_ctx, unsigned int gpu_max_seqlen
-#endif
-                     ) {
+                     bool multithread, bool verbose, int SSE, bool gapless, bool greedy) {
     int newi = 0, nshuffle = 0;
     bool shuffled = false;
 
     B *bb = b_new(raws, nraw, omegaA, omegaP, use_quals);
 
     /* Initial comparison - all raws vs cluster 0, no kmer screen */
-#ifdef HAVE_CUDA
-    if (gpu_ctx) {
-        gpu_upload_err_mat(gpu_ctx, err_mat, 16, ncol_err);
-        b_compare_gpu(bb, 0, err_mat, ncol_err, gpu_ctx, gpu_max_seqlen,
-                      match, mismatch, gap_pen, use_kmers, 1.0, band_size, gapless, greedy, verbose);
-    } else
-#endif
-    {
-        b_compare_omp(bb, 0, err_mat, ncol_err, match, mismatch, gap_pen, homo_gap_pen,
-                      use_kmers, 1.0, band_size, vectorized_alignment, SSE, gapless, greedy, verbose);
-    }
+    b_compare_omp(bb, 0, err_mat, ncol_err, match, mismatch, gap_pen, homo_gap_pen,
+                  use_kmers, 1.0, band_size, vectorized_alignment, SSE, gapless, greedy, verbose);
 
     b_p_update(bb, greedy, detect_singletons);
 
@@ -395,16 +324,8 @@ static B *run_dada_c(Raw **raws, int nraw, double *err_mat, int ncol_err,
     while ((bb->nclust < (unsigned)max_clust) && (newi = b_bud(bb, min_fold, min_hamming, min_abund, verbose))) {
         if (verbose) printf("\nNew Cluster C%d:", newi);
 
-#ifdef HAVE_CUDA
-        if (gpu_ctx) {
-            b_compare_gpu(bb, newi, err_mat, ncol_err, gpu_ctx, gpu_max_seqlen,
-                          match, mismatch, gap_pen, use_kmers, kdist_cutoff, band_size, gapless, greedy, verbose);
-        } else
-#endif
-        {
-            b_compare_omp(bb, newi, err_mat, ncol_err, match, mismatch, gap_pen, homo_gap_pen,
-                          use_kmers, kdist_cutoff, band_size, vectorized_alignment, SSE, gapless, greedy, verbose);
-        }
+        b_compare_omp(bb, newi, err_mat, ncol_err, match, mismatch, gap_pen, homo_gap_pen,
+                      use_kmers, kdist_cutoff, band_size, vectorized_alignment, SSE, gapless, greedy, verbose);
 
         nshuffle = 0;
         do {
